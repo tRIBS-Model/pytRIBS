@@ -429,7 +429,8 @@ class MetProcessor(Aux, InOut):
         return nldas_time_series, station_coordinates
 
     def convert_and_write_nldas_timeseries(self, list_dfs, station_coords, gmt,
-                                           prefix=None, met_path=None, precip_path=None):
+                                           prefix=None, met_path=None, precip_path=None,
+                                           orig_begin=None, orig_end=None):
         """
         Convert NLDAS-2 timeseries data to UTM coordinates and prepare for tRIBS input.
 
@@ -508,6 +509,11 @@ class MetProcessor(Aux, InOut):
         Rv = 461  # Gas constant for moist air (J/kg-K)
 
         for df in list_dfs:
+            # Apply GMT offset to the index
+            df.index = df.index + pd.to_timedelta(gmt, unit='h')
+            if orig_begin and orig_end:
+                df = df.loc[orig_begin:orig_end].copy()
+
             # Initialize dictionaries for station details
             met_sdf = {'station_id': None, 'file_path': None, 'lat_dd': None, 'y': None, 'long_dd': None, 'x': None,
                        'GMT': None, 'record_length': None, 'num_parameters': None, 'other': None}
@@ -534,6 +540,19 @@ class MetProcessor(Aux, InOut):
             df['RH'] = 100 * (df['VP'] / df['e_sat'])
 
             df.rename(columns={'rsds': 'IS', 'prcp': 'R', 'psurf': 'PA'}, inplace=True)
+            
+            # Define rounding rules for each parameter
+            rounding_rules = {
+                'PA': 2,    # Pressure (hPa)
+                'RH': 2,    # Relative Humidity (%)
+                'US': 3,    # Wind Speed (m/s)
+                'TA': 2,    # Air Temperature (C)
+                'IS': 2,    # Incoming Shortwave Radiation (W/m^2)
+                'R': 4,     # Precipitation Rate (kg/m^2/s)
+                'VP': 3     # Vapor Pressure (hPa)
+            }
+            df = df.round(rounding_rules)
+
             df['date'] = df.index.values
 
             # Write out files with pytrib utility class InOut
@@ -626,9 +645,15 @@ class MetProcessor(Aux, InOut):
         lat, lon, gmt = self.polygon_centroid_to_geographic(watershed)
         x, y = watershed.centroid.x, watershed.centroid.y
         centroids = [(x,y)]
-        nldas_df = self.get_nldas_point(centroids, begin, end, epsg=self.meta['EPSG'],
+
+        # Adjust dates to aquire an extra day for GMT offset
+        download_begin = (pd.to_datetime(begin) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+        download_end = (pd.to_datetime(end) + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+
+        nldas_df = self.get_nldas_point(centroids, download_begin, download_end, epsg=self.meta['EPSG'],
                                         HYRIVER_CACHE_NAME=f"{met_dir}/cache/aiohttp_cache.sqlite")
         coords = [lon, x, lat, y, elev]
-        self.convert_and_write_nldas_timeseries([nldas_df.copy()],[coords], gmt)
+        self.convert_and_write_nldas_timeseries([nldas_df.copy()],[coords], gmt,
+                                                orig_begin=begin, orig_end=end)
 
         return nldas_df
