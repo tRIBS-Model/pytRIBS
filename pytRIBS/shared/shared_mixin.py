@@ -8,9 +8,12 @@ import numpy as np
 import geopandas as gpd
 import pandas as pd
 import pyvista as pv
+import math
 from shapely.geometry import LineString
 from shapely.geometry import Point
 from shapely.geometry import Polygon
+from rasterio.transform import from_origin
+from rasterio.features import rasterize
 
 
 class Meta:
@@ -680,3 +683,128 @@ class Shared:
         else:
             print('Unable To Load Voi File(s).')
             self.voronoi = None
+
+    @staticmethod
+    def grid_geodataframe(gdf, value_column, cell_size, nodata_value=-9999.0, fill_nodata_with_mean=False):
+        """
+        Rasterizes a GeoDataFrame using area-weighted averaging.
+
+        This method is calculating the value of each raster cell based on the proportional area of all voronoi 
+        polygons that overlap it.
+
+        Parameters
+        ----------
+        gdf : GeoDataFrame
+            The GeoDataFrame that contains the voronoi polygons and outputs 
+            to rasterize. Must have a valid CRS.
+        value_column : str
+            The name of the column in the gdf to use for the raster values.
+        cell_size : float
+            The desired cell size (resolution) of the output raster.
+        nodata_value : float, optional
+            The value for pixels that do not fall within any polygon. A value 
+            of -9999.0 is usually appropriate for tRIBS.
+        fill_nodata_with_mean : bool, optional
+            If True, any remaining nodata cells in the final raster will be
+            filled with the mean of all valid data cells. Defaults to False.
+
+        Returns
+        -------
+        dict or None
+            A dictionary containing 'data' and 'profile' for write_ascii.
+            Returns None if the input GeoDataFrame has no CRS defined.
+
+        Example
+        -------
+        >>> dynamic_data_dict = results.merge_parallel_spatial_files(suffix="_00d", dtime=final_runtime, single=True)
+        >>> gdf_final_state = results.voronoi.merge(dynamic_data_dict, on='ID')
+        >>> final_gw_raster_dict = results.grid_geodataframe( gdf=gdf_final_state, value_column='Nwt', cell_size=30.0)
+
+        Raises
+        ------
+        Error
+            If there is not a valid CRF attached to the GeoDataFrame.
+        """
+
+        # 0. Check for a valid CRS
+        if gdf.crs is None:
+            print("ERROR: Input GeoDataFrame has no CRS defined.")
+            print("Please set one in the pytRIBS project class metadata or using `your_gdf.set_crs('EPSG:XXXX')` before proceeding.")
+            return None
+
+        # 1. Create a grid of square polygons (pixels) with an automatic buffer
+        data_min_x, data_min_y, data_max_x, data_max_y = gdf.total_bounds
+        data_width = data_max_x - data_min_x
+        data_height = data_max_y - data_min_y
+        buffer_from_scale = 0.02 * (data_width + data_height) / 2
+        buffer_from_pixel = cell_size
+        final_buffer = max(buffer_from_scale, buffer_from_pixel)
+        min_x = math.floor((data_min_x - final_buffer) / cell_size) * cell_size
+        max_x = math.ceil((data_max_x + final_buffer) / cell_size) * cell_size
+        min_y = math.floor((data_min_y - final_buffer) / cell_size) * cell_size
+        max_y = math.ceil((data_max_y + final_buffer) / cell_size) * cell_size
+        width = int(round((max_x - min_x) / cell_size))
+        height = int(round((max_y - min_y) / cell_size))
+        
+        # Create the grid of square polygons (pixels)
+        x_coords = np.arange(min_x, max_x, cell_size)
+        y_coords = np.arange(min_y, max_y, cell_size)
+        
+        polygons = []
+        pixel_ids = []
+        for i, y in enumerate(y_coords):
+            for j, x in enumerate(x_coords):
+                polygons.append(Polygon([(x, y), (x + cell_size, y), (x + cell_size, y + cell_size), (x, y + cell_size)]))
+                pixel_ids.append(i * width + j)
+
+        grid_gdf = gpd.GeoDataFrame({'pixel_id': pixel_ids}, geometry=polygons, crs=gdf.crs)
+
+        # Intersect the Voronoi polygons with the pixel grid
+        intersection_gdf = gpd.overlay(grid_gdf, gdf, how='intersection', keep_geom_type=False)
+
+        # Filter for only Polygons for clean math
+        intersection_gdf = intersection_gdf[intersection_gdf.geometry.type == 'Polygon']
+
+        # Calculate the area of each small intersected piece
+        intersection_gdf['overlap_area'] = intersection_gdf.geometry.area
+
+        # Use pandas groupby to calculate the area-weighted mean for each pixel
+        def weighted_mean(group):
+            weights = group['overlap_area']
+            values = group[value_column]
+            return np.average(values, weights=weights)
+
+        pixel_values = intersection_gdf.groupby('pixel_id').apply(weighted_mean)
+
+        # Create the final numpy array and populate it
+        final_data = np.full((height, width), nodata_value, dtype=np.float32)
+
+        for pixel_id, value in pixel_values.items():
+            row = height - 1 - (pixel_id // width)
+            col = pixel_id % width
+            if 0 <= row < height and 0 <= col < width:
+                final_data[row, col] = value
+        
+        # Optionally fill nodata values 
+        if fill_nodata_with_mean:
+            nodata_mask = (final_data == nodata_value)
+            valid_pixels = final_data[~nodata_mask]
+            
+            if valid_pixels.size > 0:
+                mean_value = np.mean(valid_pixels)
+                nodata_count = np.sum(nodata_mask)
+                print(f"INFO: Filling {nodata_count} nodata cells with the mean value: {mean_value:.4f}")
+                final_data[nodata_mask] = mean_value
+            else:
+                print("WARNING: No valid data found in the raster. Cannot fill nodata values.")
+
+        # Create the profile for the output raster
+        transform = from_origin(min_x, max_y, cell_size, cell_size)
+        
+        profile = {
+            'driver': 'AAIGrid', 'count': 1, 'height': height, 'width': width,
+            'transform': transform, 'crs': gdf.crs, 'dtype': 'float32',
+            'nodata': nodata_value
+        }
+        
+        return {'data': final_data, 'profile': profile}
