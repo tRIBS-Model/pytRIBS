@@ -574,11 +574,13 @@ class InOut:
         return input
 
     @staticmethod
-    def write_ascii(raster_dict, output_file_path,dtype='float32'):
+    def write_ascii(raster_dict, output_file_path,dtype='float32', decimals=None):
         """
         Writes raster data and metadata from a dictionary to an ASCII raster file.
         :param raster_dict: Dictionary containing 'data', 'profile', and additional metadata.
         :param output_file_path: Output ASCII raster file path.
+        :param dtype: Data type for the output raster (default is 'float32').
+        :param decimals: Optional integer specifying number of decimal places for raster values.
         """
         # Extract data and metadata from the dictionary
         data = raster_dict['data']
@@ -623,17 +625,35 @@ class InOut:
 
         updated_lines = []
         replaced = False
-        for line in lines:
-            if line.startswith("dx") or line.startswith("dy"):
-                if replaced == False:
-                    updated_lines.append("cellsize"+ " " + str(math.ceil(float(line.split()[1]))) + "\n")
-                    replaced = True
+    
+        # Use enumerate to get the line number (i)
+        for i, line in enumerate(lines):
+            # Check if we are in the header (first 6 lines)
+            if i < 6:
+                if line.startswith("dx") or line.startswith("dy"):
+                    if not replaced:
+                        updated_lines.append("cellsize " + str(math.ceil(float(line.split()[1]))) + "\n")
+                        replaced = True
+                else:
+                    updated_lines.append(line)
+            # We are in the data part of the file (everything after line 5)
             else:
-                updated_lines.append(line)
-        # Write the updated content back to the file
+                # Check if the user wants to format the numbers
+                if decimals is not None and isinstance(decimals, int):
+                    # Create a format string, e.g., "%.0f" or "%.1f"
+                    fmt = f"%.{decimals}f"
+                    # Check for empty lines, which can happen at the end of files
+                    if line.strip():
+                        new_line = " ".join([fmt % float(n) for n in line.strip().split()]) + "\n"
+                        updated_lines.append(new_line)
+                else:
+                    # If decimals is None, just add the original line back
+                    updated_lines.append(line)
 
+        # Write the fully updated content back to the file
         with open(output_file_path, 'w') as file:
             file.writelines(updated_lines)
+
     @staticmethod
     def write_node_file(node_ids, file_path):
         # Open the file for writing
