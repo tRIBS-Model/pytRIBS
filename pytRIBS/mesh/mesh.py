@@ -1369,21 +1369,51 @@ class GenerateMesh:
         return plotter
 
     @staticmethod
-    def generate_meshbuild_input_file(filename, base_name, point_filename):
-        """ Helper function that generates the input file to run with the MeshBuilder app."""
+    def generate_meshbuild_input_file(filename, base_name, point_filename=None, mesh_filename=None):
+        """
+        Generates the input file for the meshbuilder executable.
+
+        Handles two modes: generating a mesh from points (provide 'point_filename')
+        or processing a pre-existing mesh (provide 'existing_mesh_filename').
+
+        Parameters
+        ----------
+        filename : str
+            Path where the input file will be written.
+        out_filename : str
+            The base name for meshbuilder output files (OUTFILENAME).
+        params : dict
+            Dictionary of meshbuilder parameters. Expected keys:
+            'velocity_ratio', 'baseflow', 'velocity_coef', 'flow_exp'.
+        point_filename : str, optional
+            Filename of the .points file for mesh generation.
+        existing_mesh_filename : str, optional
+            Filename of an existing mesh to be processed.
+        """
+        # Input Validation
+        if not (point_filename or mesh_filename):
+            raise ValueError("Must provide either 'point_filename' or 'existing_mesh_filename'.")
+        if point_filename and mesh_filename:
+            raise ValueError("Provide either 'point_filename' or 'existing_mesh_filename', not both.")
+
+        # Build the file content
+        lines = []
+        lines.append(f"VELOCITYRATIO:\n1.2")
+        lines.append(f"BASEFLOW:\n0.2")
+        lines.append(f"VELOCITYCOEF:\n60")
+        lines.append(f"FLOWEXP:\n0.3")
+        lines.append(f"OUTFILENAME:\n{base_name}")
+
+        if point_filename:
+            lines.append(f"POINTFILENAME:\n{point_filename}")
+            lines.append("OPTMESHINPUT:\n8")
+        else: # mesh_filename must be set due to validation above
+            lines.append(f"INPUTDATAFILE:\n{mesh_filename}")
+            lines.append("OPTMESHINPUT:\n1")
+        
+        # Write the file
         with open(filename, 'w') as file:
-            file.write("VELOCITYRATIO:\n")
-            file.write(f"{str(1.2)}\n")
-            file.write("BASEFLOW:\n")
-            file.write(f"{str(0.2)}\n")
-            file.write("VELOCITYCOEF:\n")
-            file.write(f"{str(60)}\n")
-            file.write("FLOWEXP:\n")
-            file.write(f"{str(0.3)}\n")
-            file.write("OUTFILENAME:\n")
-            file.write(f"{base_name}\n")
-            file.write("POINTFILENAME:\n")
-            file.write(f"{point_filename}\n")
+            file.write('\n'.join(lines) + '\n')
 
     @staticmethod
     def partition_mesh(volume, partition_args):
