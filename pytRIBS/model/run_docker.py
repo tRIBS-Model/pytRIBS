@@ -23,7 +23,7 @@ class tRIBSDocker:
     """
 
     def __init__(self, volume_path, input_file, execution_mode='serial', num_processes=None):
-        self.image_name = "tribs/tribs:dev" # TODO this needs to be updated once stable version is added to latest
+        self.image_name = "tribs/tribs:latest"
         self.volume_path = volume_path
         self.execution_mode = execution_mode
         self.num_processes = num_processes

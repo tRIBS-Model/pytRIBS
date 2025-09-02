@@ -104,7 +104,7 @@ class InOut:
                 file.write(f"Created by: {current_user}\n")
                 file.write(f"On: {formatted_datetime}\n\n")
 
-                string = 'Input File Template for tRIBS Version 5.2'
+                string = 'Input File Template for tRIBS Version 5.3.0'
                 underline = '=' * len(string)
                 file.write(f'{underline}\n{string}\n{underline}\n\n')
                 file.write(meta)

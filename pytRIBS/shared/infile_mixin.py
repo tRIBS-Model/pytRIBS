@@ -123,7 +123,7 @@ class Infile:
             "optluinterp": {"keyword": "OPTLUINTERP:", "describe": "Option for interpolation of land cover\n" + \
                                                                     "0  Constant (previous) values between land cover\n" + \
                                                                     "1  Linear interpolation between land cover",
-                            "value": 1, "tags": ["hydro"]},
+                            "value": 0, "tags": ["hydro"]},
             "optsoiltype": {"keyword": "OPTSOILTYPE:", "describe": "Option for soil input type: 0 soil table, 1 soil "
                                                                     "rasters\n See SCGRID, SOILTABLENAME, and SOILMAPNAME",
                             "value": 0, "tags": ["hydro"]},
