@@ -21,7 +21,7 @@ class SoilProcessor:
     """
     # Assigning references to the methods
     @staticmethod
-    def _discrete_colormap(N, base_cmap=None):
+    def discrete_colormap(N, base_cmap=None):
         cmap = Aux.discrete_cmap(N, base_cmap)
         return cmap
     @staticmethod

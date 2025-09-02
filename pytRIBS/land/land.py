@@ -9,11 +9,11 @@ from pytRIBS.shared.inout import InOut
 
 class LandProcessor(InOut):
     @staticmethod
-    def _discrete_colormap(N, base_cmap=None):
+    def discrete_colormap(N, base_cmap=None):
         cmap = Aux.discrete_cmap(N, base_cmap)
         return cmap
     @staticmethod
-    def _update_landfiles_with_dates(file_path, date_str):
+    def update_landfiles_with_dates(file_path, date_str):
         Aux.rename_file_with_date(file_path,date_str)
         return
     @staticmethod
