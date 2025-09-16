@@ -663,12 +663,12 @@ class SoilProcessor:
                 # Alpha parameter from rosetta corresponds approximately to the inverse of the air-entry value, cm−1
                 # https://doi.org/10.1029/2019MS001784
                 # Convert from log10(cm) into -1/mm
-                psib[0, i, j] = -1 / ((10 ** mean[0, 2]) * 10)
+                psib[0, i, j] = -1 / (10 ** mean[0, 2]) * 10
 
-                # Pore-size Distribution can be calculated from n using m = 1-1/n
+                # Pore-size Distribution can be calculated from n using m = n - 1
                 # http://dx.doi.org/10.4236/ojss.2012.23025
                 # Convert from log10(n) into n
-                m[0, i, j] = 1 - (1 / (10 ** mean[0, 3]))
+                m[0, i, j] = (10 ** mean[0, 3]) - 1
 
         # for now only write out mean values
         soil_prop = [ks[0, :, :], theta_r[0, :, :], theta_s[0, :, :], psib[0, :, :], m[0, :, :]]
