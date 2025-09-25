@@ -66,9 +66,9 @@ class Shared:
         month = int(starting_date[0:2])
         day = int(starting_date[3:5])
         year = int(starting_date[6:10])
-        minute = int(starting_date[11:13])
-        second = int(starting_date[14:16])
-        date = pd.Timestamp(year=year, month=month, day=day, minute=minute)
+        hour = int(starting_date[11:13])
+        minute = int(starting_date[14:16])
+        date = pd.Timestamp(year=year, month=month, day=day, hour=hour, minute=minute)
         return date
 
     def read_voi_file(self, filename=None):
