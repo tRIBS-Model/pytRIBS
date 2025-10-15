@@ -230,7 +230,7 @@ class Read():
             'ET_mm_h': pixel['EvpTtrs_mm_h'] - (
                     pixel['SnSub_cm'] * 10 + pixel['SnEvap_cm'] * 10 + pixel['IntSub_cm'] * 10),
             'Qsurf_mm_h': pixel['Srf_Hour_mm'],
-            'Qunsat_mm_h': pixel['QpIn_mm_h'] - pixel['QpOut_mm_h'],
+            'Qunsat_mm_h': pixel['QpOut_mm_h'] - pixel['QpIn_mm_h'],
             'Qsat_mm_h': pixel['GWflx_m3_h'] / element_area * 1000
         })
 
@@ -277,7 +277,7 @@ class Read():
             'P_mm_h': mrf['MAP'],
             'ET_mm_h': mrf['MET'] - 10 * (mrf['AvSnSub'] + mrf['AvSnEvap'] + mrf['AvInSu']),
             'Qsurf_mm_h': mrf['Srf'] * 3600 * 1000 / drainage_area,
-            'Qunsat_mm_h': 0,  # assumed zero, but not sure if correct?
+            'Qunsat_mm_h': mrf['Qunsat'],  # assumed zero, but not sure if correct?
             'Qsat_mm_h': 0  # assumed zero, but not sure if correct?
         })
 

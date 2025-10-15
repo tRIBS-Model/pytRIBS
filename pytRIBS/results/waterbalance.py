@@ -369,7 +369,7 @@ class WaterBalance:
         waterbalance.update({'nP': df['P_mm_h'].sum()})
         waterbalance.update({'nET': df['ET_mm_h'].sum()})
         waterbalance.update({'nQsurf': df['Qsurf_mm_h'].sum()})
-        waterbalance.update({'nQunsat': 0})  # Assumption in model is closed boundaries at divide and outlet
+        waterbalance.update({'nQunsat': df['Qunsat_mm_h'].sum()})  # Assumption in model is closed boundaries at divide and outlet
         waterbalance.update({'nQsat': 0})
     
         return waterbalance
