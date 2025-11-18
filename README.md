@@ -9,7 +9,7 @@ pytRIBS documentation is available [here.](https://pytribs.readthedocs.io/en/lat
 A full tRIBS model setup, simulation, and analysis is provided [here.](https://zenodo.org/records/13988020)
 
 ## Known Issues
-* Downloading NLDAS-2 data is limited to a year or two, otherwise NaNs are introduced. This attribute to the pynldas-2 library, but w
+* As of October 2025 the package, pynldas2 for downloading NLDAS2 timeseries is no longer functional. This breaks the meteorological workflow in pytRIBS for time being until the package is updated to work with the new API.
 
 ## Release/Version Notes
 PytRIBS uses semantic versioning. Currently, we are in the initial development phase--anything MAY change at any time and
