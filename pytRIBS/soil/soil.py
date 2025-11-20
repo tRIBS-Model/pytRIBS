@@ -12,6 +12,8 @@ from pytRIBS.shared.inout import InOut
 from pytRIBS.shared.aux import Aux
 from timezonefinder import TimezoneFinder
 from datetime import datetime
+import rasterio
+from rasterio.warp import calculate_default_transform, reproject, Resampling
 import pytz
 
 
@@ -21,7 +23,7 @@ class SoilProcessor:
     """
     # Assigning references to the methods
     @staticmethod
-    def _discrete_colormap(N, base_cmap=None):
+    def discrete_colormap(N, base_cmap=None):
         cmap = Aux.discrete_cmap(N, base_cmap)
         return cmap
     @staticmethod
@@ -303,53 +305,121 @@ class SoilProcessor:
             ['path/to/downloaded_file_1.tif', 'path/to/downloaded_file_2.tif', ...]
             """
 
-        epsg = self.meta['EPSG']
-
-        if epsg is None:
-            print("No EPSG code found. Please update model attribute .meta['EPSG'] with EPSG code.")
+        target_epsg = self.meta['EPSG']
+        if target_epsg is None:
+            print("No EPSG code found. Please update model attribute .meta['EPSG'].")
             return
 
-        complete = False
+        # Sanitize EPSG code
+        match = re.search(r'(\d+)', str(target_epsg))
+        if match:
+            target_epsg_code = int(match.group(1))
+        else:
+            print(f"Invalid EPSG code: {target_epsg}")
+            return
 
-        # match = re.search(r'EPSG:(\d+)', epsg)
-        # if match:
-        #     epsg = match.group(1)
-
+        # Make sure sg250 directory exists in the CURRENT working directory
         data_dir = 'sg250'
         if not os.path.exists(data_dir):
             os.makedirs(data_dir)
             print(f"Directory '{data_dir}' created.")
 
-        os.chdir(data_dir)
-
-        crs = f'urn:ogc:def:crs:EPSG::{epsg}'
+        # Calculate WGS84 Bounding Box for the Request
+        # We transform the requested BBOX (Model CRS) -> WGS84 (EPSG:4326)
+        transformer = Transformer.from_crs(f"EPSG:{target_epsg_code}", "EPSG:4326", always_xy=True)
+        minx, miny, maxx, maxy = bbox
+        lon_min, lat_min = transformer.transform(minx, miny)
+        lon_max, lat_max = transformer.transform(maxx, maxy)
+        
+        # WCS 1.0.0 expects [minx, miny, maxx, maxy]
+        bbox_wgs84 = [lon_min, lat_min, lon_max, lat_max]
 
         files = []
+        complete = False
 
-        print('Downloading data, this may take several minutes or more...')
+        print('Downloading data from SoilGrids (WGS84) and reprojecting...')
+        
         for var in soil_vars:
-            wcs = WebCoverageService(f'http://maps.isric.org/mapserv?map=/map/{var}.map', version='1.0.0', timeout=300)
-            for depth in depths:
+            # Connect to ISRIC WCS
+            try:
+                wcs = WebCoverageService(f'http://maps.isric.org/mapserv?map=/map/{var}.map', version='1.0.0', timeout=300)
+            except Exception as e:
+                print(f"Could not connect to service for {var}: {e}")
+                continue
 
-                # for a given variable, depth, and stat write out a geotif
+            for depth in depths:
                 for stat in stats:
                     soil_key = f'{var}_{depth}_{stat}'
-                    file = f'{soil_key}.tif'
-                    files.append(file)
+                    filename = f'{soil_key}.tif'
+                    
+                    files.append(filename) 
+                    
+                    # Define where to save it
+                    final_path = os.path.join(data_dir, filename)
+                    temp_path = os.path.join(data_dir, f'temp_{soil_key}.tif')
 
-                    if (os.path.isfile(file) and replace == True) or not os.path.isfile(file):
-                        response = wcs.getCoverage(identifier=soil_key, crs=crs, bbox=bbox, resx=250, resy=250,
-                                                   format='GEOTIFF_INT16', timeout=120)
-                        with open(file, 'wb') as file:
-                            file.write(response.read())
+                    # Skip if exists
+                    if os.path.isfile(final_path) and not replace:
+                        complete = True # Mark as success if file exists
+                        continue
+
+                    try:
+                        # 1. Download Raw WGS84 Data
+                        # resx/resy 0.002083 deg is approx 250m
+                        response = wcs.getCoverage(
+                            identifier=soil_key, 
+                            crs='EPSG:4326', 
+                            bbox=bbox_wgs84, 
+                            resx=0.002083, 
+                            resy=0.002083, 
+                            format='GEOTIFF_INT16', 
+                            timeout=120
+                        )
+                        
+                        with open(temp_path, 'wb') as f:
+                            f.write(response.read())
+
+                        # 2. Reproject Locally using Rasterio
+                        with rasterio.open(temp_path) as src:
+                            transform, width, height = calculate_default_transform(
+                                src.crs, f'EPSG:{target_epsg_code}', src.width, src.height, *src.bounds
+                            )
+                            kwargs = src.meta.copy()
+                            kwargs.update({
+                                'crs': f'EPSG:{target_epsg_code}',
+                                'transform': transform,
+                                'width': width,
+                                'height': height
+                            })
+
+                            with rasterio.open(final_path, 'w', **kwargs) as dst:
+                                reproject(
+                                    source=rasterio.band(src, 1),
+                                    destination=rasterio.band(dst, 1),
+                                    src_transform=src.transform,
+                                    src_crs=src.crs,
+                                    dst_transform=transform,
+                                    dst_crs=f'EPSG:{target_epsg_code}',
+                                    resampling=Resampling.nearest
+                                )
+                        
+                        # Clean up temp file
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                        
                         complete = True
+
+                    except Exception as e:
+                        print(f"Failed to process {soil_key}: {e}")
+                        # Clean up garbage
+                        if os.path.exists(final_path) and os.path.getsize(final_path) < 2000:
+                             os.remove(final_path)
 
         if complete:
             print('Download of SoilGrids250 data complete')
         else:
             print('No SoilGrids250 data was downloaded check inputs or set replace == False.')
 
-        os.chdir('..')
         return files
 
     def create_soil_map(self, grid_input, output=None):
@@ -663,12 +733,12 @@ class SoilProcessor:
                 # Alpha parameter from rosetta corresponds approximately to the inverse of the air-entry value, cm−1
                 # https://doi.org/10.1029/2019MS001784
                 # Convert from log10(cm) into -1/mm
-                psib[0, i, j] = -1 / ((10 ** mean[0, 2]) * 10)
+                psib[0, i, j] = -1 / (10 ** mean[0, 2]) * 10
 
-                # Pore-size Distribution can be calculated from n using m = 1-1/n
+                # Pore-size Distribution can be calculated from n using m = n - 1
                 # http://dx.doi.org/10.4236/ojss.2012.23025
                 # Convert from log10(n) into n
-                m[0, i, j] = 1 - (1 / (10 ** mean[0, 3]))
+                m[0, i, j] = (10 ** mean[0, 3]) - 1
 
         # for now only write out mean values
         soil_prop = [ks[0, :, :], theta_r[0, :, :], theta_s[0, :, :], psib[0, :, :], m[0, :, :]]

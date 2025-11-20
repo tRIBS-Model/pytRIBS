@@ -14,10 +14,18 @@ A full tRIBS model setup, simulation, and analysis is provided [here.](https://z
 ## Release/Version Notes
 PytRIBS uses semantic versioning. Currently, we are in the initial development phase--anything MAY change at any time and
 this package SHOULD NOT be considered stable.
-### Verison 0.6.0 (in development)
-* fixed bug in reading landuse table (can only use for model or land class though)
-
-### Verison 0.5.0 (in development)
+### Verison 0.6.0 (11/20/2025)
+* Fixed bug in reading landuse table (can only use for model or land class though).
+* Added optional input to write_ascii() that allows user to specify number of decimal places in output raster.
+* Added new function, grid_geodataframe(), in the shared class that is called from the results object. The tool ingests a GDF containing a the voronoi polygon geometry with a spatial output attached and rasterizes that into a data dictionary for file writing.
+* Updated generate_meshbuild_input_file() to handle additonal input options for mesh data in newest version of MeshBuilder software.
+* Restored public API for Land and Soil helper methods.
+* Updated run_docker.py to use the latest branch of tRIBS and removed hardcoding of "OPTLUINTERP" in the input file.
+* Fixed a unit conversion erro in how tRIBS soil parameters are calculated from the ROSETTA3 outputs.
+* Fixed a bug in convert_to_datetime function that incorrectly reads the starting date from the tRIBS input file.
+* Added the function write_geotiff that follows the same functionality as the existing write_ascii function.
+* Modified the get_soil_grids function so that the ISRIC soil data is download in its native WGS84 CRS then is reprojected locally. Changed due to recent update to in ISRIC api.
+### Verison 0.5.0 (07/13/2024)
 * Added in unsupervised classification function for NAIP image and Tree hieght rasters in Land Class
 * Finalized Mesh Class, with dependence on a Preprocessing Class (DEM and GIS analysis) and MeshGeneration Class
 * Model class can be initialized with combination of Met, Soil, Land, and Mesh classes as well as an input file

@@ -104,7 +104,7 @@ class InOut:
                 file.write(f"Created by: {current_user}\n")
                 file.write(f"On: {formatted_datetime}\n\n")
 
-                string = 'Input File Template for tRIBS Version 5.2'
+                string = 'Input File Template for tRIBS Version 5.3.0'
                 underline = '=' * len(string)
                 file.write(f'{underline}\n{string}\n{underline}\n\n')
                 file.write(meta)
@@ -574,11 +574,13 @@ class InOut:
         return input
 
     @staticmethod
-    def write_ascii(raster_dict, output_file_path,dtype='float32'):
+    def write_ascii(raster_dict, output_file_path,dtype='float32', decimals=None):
         """
         Writes raster data and metadata from a dictionary to an ASCII raster file.
         :param raster_dict: Dictionary containing 'data', 'profile', and additional metadata.
         :param output_file_path: Output ASCII raster file path.
+        :param dtype: Data type for the output raster (default is 'float32').
+        :param decimals: Optional integer specifying number of decimal places for raster values.
         """
         # Extract data and metadata from the dictionary
         data = raster_dict['data']
@@ -623,17 +625,35 @@ class InOut:
 
         updated_lines = []
         replaced = False
-        for line in lines:
-            if line.startswith("dx") or line.startswith("dy"):
-                if replaced == False:
-                    updated_lines.append("cellsize"+ " " + str(math.ceil(float(line.split()[1]))) + "\n")
-                    replaced = True
+    
+        # Use enumerate to get the line number (i)
+        for i, line in enumerate(lines):
+            # Check if we are in the header (first 6 lines)
+            if i < 6:
+                if line.startswith("dx") or line.startswith("dy"):
+                    if not replaced:
+                        updated_lines.append("cellsize " + str(math.ceil(float(line.split()[1]))) + "\n")
+                        replaced = True
+                else:
+                    updated_lines.append(line)
+            # We are in the data part of the file (everything after line 5)
             else:
-                updated_lines.append(line)
-        # Write the updated content back to the file
+                # Check if the user wants to format the numbers
+                if decimals is not None and isinstance(decimals, int):
+                    # Create a format string, e.g., "%.0f" or "%.1f"
+                    fmt = f"%.{decimals}f"
+                    # Check for empty lines, which can happen at the end of files
+                    if line.strip():
+                        new_line = " ".join([fmt % float(n) for n in line.strip().split()]) + "\n"
+                        updated_lines.append(new_line)
+                else:
+                    # If decimals is None, just add the original line back
+                    updated_lines.append(line)
 
+        # Write the fully updated content back to the file
         with open(output_file_path, 'w') as file:
             file.writelines(updated_lines)
+
     @staticmethod
     def write_node_file(node_ids, file_path):
         # Open the file for writing
@@ -644,3 +664,61 @@ class InOut:
             # Write each item on a separate line
             for number in node_ids:
                 file.write(f"{number}\n")
+
+    @staticmethod
+    def write_geotiff(raster_dict, output_file_path, dtype='float32', compress=None):
+        """
+        Writes raster data and metadata from a dictionary to a GeoTIFF file.
+
+        This is a more efficient and robust alternative to ASCII for visualization
+        and analysis purposes.
+
+        :param raster_dict: Dictionary containing 'data' and 'profile' keys.
+                            'data' is the 2D numpy array of raster values.
+                            'profile' is the rasterio metadata dictionary.
+        :param output_file_path: Path for the output GeoTIFF file (e.g., 'output.tif').
+        :param dtype: Data type for the output raster (default is 'float32').
+        :param compress: Optional compression method. Common choices are 'lzw',
+                        'deflate', or 'packbits'. Using compression is highly
+                        recommended to reduce file size.
+        """
+        # 1. Make a copy of the profile to avoid modifying the original dict
+        profile = raster_dict['profile'].copy()
+        data = raster_dict['data']
+
+        # 2. Update the profile for the GeoTIFF driver
+        profile.update(
+            driver='GTiff',  # Set the driver to GeoTIFF
+            dtype=dtype      # Set the desired data type
+        )
+        
+        # 3. Add compression to the profile if specified by the user
+        # This is a major advantage of GeoTIFFs
+        if compress:
+            profile['compress'] = compress
+            # For LZW or DEFLATE, we can also add a predictor for better compression
+            if compress.lower() in ['lzw', 'deflate']:
+                profile['predictor'] = 2  # Horizontal differencing
+
+        # 4. Ensure a nodata value is set in the profile
+        # If the source data didn't have one, assign a standard one.
+        if 'nodata' not in profile:
+            profile['nodata'] = -9999.0
+        
+        # 5. Replace any numpy NaN values in the data array with the nodata value
+        # This is crucial as NaN is not a valid value in a saved raster band.
+        data = np.where(np.isnan(data), profile['nodata'], data)
+
+        # 6. Ensure the output directory exists before writing
+        # This makes the function more robust.
+        output_dir = os.path.dirname(output_file_path)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+
+        # 7. Write the data to the GeoTIFF file
+        # This is much simpler than the ASCII version because rasterio handles
+        # all the internal formatting. No manual file editing is needed.
+        with rasterio.open(output_file_path, 'w', **profile) as dst:
+            dst.write(data.astype(dtype), 1)
+
+        print(f"Successfully wrote GeoTIFF to: {output_file_path}")
