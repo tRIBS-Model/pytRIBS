@@ -15,6 +15,7 @@ license = {text = "GPL-version 2"}
 keywords = ["hydrology","modeling"]
 dependencies = [
     "docker~=7.1.0",
+    "earthaccess~=0.15.1",
     "geopandas~=0.14.4",
     "matplotlib-scalebar~=0.9.0",
     "matplotlib~=3.8.4",
@@ -34,6 +35,7 @@ dependencies = [
     "timezonefinder~=6.5.9",
     "whitebox~=2.3.6",
     "xarray~=2025.4.0",
+
 ]
 version = "0.5.0"
 
