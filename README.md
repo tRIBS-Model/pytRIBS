@@ -14,7 +14,7 @@ A full tRIBS model setup, simulation, and analysis is provided [here.](https://z
 ## Release/Version Notes
 PytRIBS uses semantic versioning. Currently, we are in the initial development phase--anything MAY change at any time and
 this package SHOULD NOT be considered stable.
-## Version 0.6.1 (11/26/2025)
+## Version 0.7.0 (In Progress)
 * Refactored the get_nldas_point method in the meteorological workflow to remove the dependency on pynldas2 (which has become unstable due to NASA API changes) and implements a direct connection to the NASA Giovanni API.
 * Added earthaccess package to pyproject.toml for authorizing NLDAS-2 data download.
 * Added new optional input to the run_soil_workflow for downloading POLARIS data rather than the ISRIC dataset. Can be controlled with the `source` argument but defaults to ISRIC if not specified.
