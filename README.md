@@ -14,6 +14,11 @@ A full tRIBS model setup, simulation, and analysis is provided [here.](https://z
 ## Release/Version Notes
 PytRIBS uses semantic versioning. Currently, we are in the initial development phase--anything MAY change at any time and
 this package SHOULD NOT be considered stable.
+## Version 0.6.1 (11/26/2025)
+* Refactored the get_nldas_point method in the meteorological workflow to remove the dependency on pynldas2 (which has become unstable due to NASA API changes) and implements a direct connection to the NASA Giovanni API.
+* Added earthaccess package to pyproject.toml for authorizing NLDAS-2 data download.
+* Added new optional input to the run_soil_workflow for downloading POLARIS data rather than the ISRIC dataset. Can be controlled with the `source` argument but defaults to ISRIC if not specified.
+* Adjusted how the exponential decay coefficient of hydraulic conductivity is calculated to better represent the surface surface layer.
 ### Verison 0.6.0 (11/20/2025)
 * Fixed bug in reading landuse table (can only use for model or land class though).
 * Added optional input to write_ascii() that allows user to specify number of decimal places in output raster.
