@@ -287,81 +287,119 @@ class Shared:
 
         return combined_gdf
 
-    def merge_parallel_spatial_files(self, suffix="_00d", dtime=0, write=True, header=True, colnames=None,
-                                     single=True):
+    def get_spatial_files(self, suffix="_00d", dtime=0, write=True, header=True, colnames=None, single=True):
         """
-        Returns dictionary of combined spatial outputs for intervals specified by tRIBS option: "SPOPINTRVL".
+        Reads and returns spatial output files (Dynamic or Integrated) for tRIBS models.
+        
+        The method determines whether to look for Serial or Parallel output files based 
+        strictly on the 'parallelmode' setting in the tRIBS input file.
+
         :param str suffix: Either _00d for dynamics outputs or _00i for time-integrated ouputs.
         :param int dtime : Option to specify time step at which to start merge of files.
-        :param bool write: Option to write dataframes to file.
+        :param bool write: Option to write combined dataframe to file (only applies if parallel).
         :param bool header: Set to False if headers are not provided with spatial files.
-        :param bool colnames: If header = False, column names can be provided for the dataframe--but it is expected the first column is ID.
-        :param bool single: If single = True then only spatial files specified at dtime are merged.
-        :return: Dictionary of pandas dataframes.
-        # TODO: Rename as get_spatial_files, and enable it to read parallel or serial results.
-        # TODO add a clean option to store .0 t0 .n files, then zip, probably would only want this if you are saving them out.
-        # TODO also return file names if saved out, also add serial version or a serial flag...so people can reaou
+        :param list colnames: If header = False, column names can be provided here.
+        :param bool single: If single = True then only spatial files specified at dtime are read.
+        :return: Dictionary of pandas dataframes keyed by time string.
         """
 
+        # 1. Load Configuration
         runtime = int(self.options["runtime"]["value"])
         spopintrvl = int(self.options["spopintrvl"]["value"])
         outfilename = self.options["outfilename"]["value"]
+        
+        # Check the source of truth: The Input File options
+        try:
+            parallel_mode = int(self.options["parallelmode"]["value"])
+        except (KeyError, ValueError):
+            print("Warning: 'parallelmode' not found in options. Defaulting to Serial (0).")
+            parallel_mode = 0
 
         dyn_data = {}
+        
+        # Calculate time steps to retrieve
         times = [dtime + i * spopintrvl for i in range((runtime - dtime) // spopintrvl + 1)]
-        times.append(runtime)
+        if times[-1] != runtime:
+            times.append(runtime)
 
         for _time in times:
-            processes = 0
             otime = str(_time).zfill(4)
-            dynfile = f"{outfilename}.{otime}{suffix}.{processes}"
+            
+            # SERIAL MODE (parallelmode = 0)
+            if parallel_mode == 0:
+                target_file = f"{outfilename}.{otime}{suffix}"
+                
+                if os.path.exists(target_file):
+                    try:
+                        if header:
+                            df = pd.read_csv(target_file, header=0)
+                        else:
+                            df = pd.read_csv(target_file, header=None, names=colnames)
+                        
+                        # Sort by ID for consistency
+                        if header and 'ID' in df.columns:
+                            df = df.sort_values(by='ID')
+                        
+                        dyn_data[otime] = df
+                        
+                    except pd.errors.EmptyDataError:
+                        print(f'The file is empty: {target_file}')
+                else:
+                    print(f"Serial output file not found: {target_file}")
+                    if single: break
 
-            if os.path.exists(dynfile):
-                while os.path.exists(dynfile):
-                    if processes == 0:
-                        processes += 1
+            # PARALLEL MODE (parallelmode = 1)
+            else:
+                # Logic to merge processor files .0, .1, .2 etc.
+                processes = 0
+                dynfile = f"{outfilename}.{otime}{suffix}.{processes}"
+                df = None
+                
+                if os.path.exists(dynfile):
+                    # Loop until we run out of processor files
+                    while os.path.exists(dynfile):
                         try:
                             if header:
-                                df = pd.read_csv(dynfile, header=0)
+                                current_df = pd.read_csv(dynfile, header=0)
                             else:
-                                df = pd.read_csv(dynfile, header=None, names=colnames)
-
+                                current_df = pd.read_csv(dynfile, header=None, names=colnames)
+                            
+                            if df is None:
+                                df = current_df
+                            else:
+                                df = pd.concat([df, current_df])
+                        
                         except pd.errors.EmptyDataError:
-                            print(f'The first file is empty: {dynfile}.\n Can not merge files.')
-                            break
+                            print(f'File empty during merge: {dynfile}')
 
-                        dynfile = f"{outfilename}.{otime}{suffix}.{processes}"
-
-                    else:
                         processes += 1
-                        try:
-
-                            if header:
-                                df = pd.concat([df, pd.read_csv(dynfile, header=0)])
-                            else:
-                                df = pd.concat([df, pd.read_csv(dynfile, header=None, names=colnames)])
-
-                        except pd.errors.EmptyDataError:
-                            print(f'The following file is empty: {dynfile}')
                         dynfile = f"{outfilename}.{otime}{suffix}.{processes}"
 
-                if header:
-                    df = df.sort_values(by='ID')
+                    if df is not None:
+                        if header and 'ID' in df.columns:
+                            df = df.sort_values(by='ID')
 
-                if write:
-                    df.to_csv(f"{outfilename}.{otime}{suffix}", index=False)
+                        # If requested, write the merged result to a standard file
+                        if write:
+                            output_path = f"{outfilename}.{otime}{suffix}"
+                            df.to_csv(output_path, index=False)
+                            # TODO: This is where we would delete the .0, .1 files if cleaning up
 
-                dyn_data[otime] = df
+                        dyn_data[otime] = df
+                
+                else:
+                    print(f"Parallel output file (processor 0) not found: {dynfile}")
+                    if single: break
 
-                if single:
-                    break
-
-
-            elif os.path.exists(dynfile):
-                print("Cannot find dynamic output file:" + dynfile)
+            if single:
                 break
 
         return dyn_data
+
+    # Deprecated Wrapper
+    def merge_parallel_spatial_files(self, *args, **kwargs):
+        """Deprecated: Use get_spatial_files instead."""
+        return self.get_spatial_files(*args, **kwargs)
 
     def mesh2vtk(self, outfile):
         """
@@ -639,42 +677,29 @@ class Shared:
             If there are issues merging files or reading Voronoi data.
         """
 
-        parallel_flag = int(self.options["parallelmode"]['value'])
+        # 1. Read Integrated Spatial Variables (*_00i)
+        # We rely on get_spatial_files to check self.options['parallelmode']
+        runtime_val = int(self.options['runtime']['value'])
+        
+        # Read the file (returns a dict)
+        temp_dict = self.get_spatial_files(suffix="_00i", dtime=runtime_val, single=True)
+        
+        runtime_str = str(runtime_val).zfill(4)
 
-        # read in integrated spatial vars for waterbalance calcs and spatial maps
-        if parallel_flag == 1:
-            temp = self.merge_parallel_spatial_files(suffix="_00i", dtime=int(self.options['runtime']['value']))
-
-            if not temp:
-                print(f'Failed to merge parallel files, check the correct file path was provided')
-
-            runtime = self.options["runtime"]["value"]
-
-            while len(runtime) < 4:
-                runtime = '0' + runtime
-
-            self.int_spatial_vars = temp[runtime]
-
-        elif parallel_flag == 0:
-            runtime = self.options["runtime"]["value"]
-
-            if len(runtime) < 4:
-                while len(runtime) < 4:
-                    runtime = '0' + runtime
-
-            outfilename = self.options["outfilename"]["value"]
-            intfile = f"{outfilename}.{runtime}_00i"
-
-            self.int_spatial_vars = pd.read_csv(intfile)
-
-            # Note one could use max CAr, but it overestimates area according to Voi geomerty
-            self.int_spatial_vars['weight'] = self.int_spatial_vars.VAr.values / self.int_spatial_vars.VAr.sum()
-
+        if temp_dict and runtime_str in temp_dict:
+            self.int_spatial_vars = temp_dict[runtime_str]
+            
+            # tRIBS outputs Voronoi Area (VAr), but we need the normalized weight for stats.
+            if 'VAr' in self.int_spatial_vars.columns:
+                 self.int_spatial_vars['weight'] = self.int_spatial_vars.VAr.values / self.int_spatial_vars.VAr.sum()
+            else:
+                 print("Warning: 'VAr' column not found in spatial output. Cannot calculate weights.")
         else:
             print('Unable To Read Integrated Spatial File (*_00i).')
             self.int_spatial_vars = None
 
         # read in voronoi files only once
+        parallel_flag = int(self.options["parallelmode"]['value'])
         if parallel_flag == 1:
             self.voronoi = self.merge_parallel_voi()
 
