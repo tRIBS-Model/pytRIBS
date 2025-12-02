@@ -579,9 +579,6 @@ class MetProcessor(Aux, InOut):
         geographic coordinates (longitude, latitude) need to be converted to UTM coordinates using the provided EPSG code.
         """
 
-        roughness_length = 0.5  # these should probably be made accessible to user, but for now hidden as met still needs refinemet.
-        displacement_height = 0.05
-
         if prefix is None and self.hydrometbasename['value'] is not None:
             prefix = self.hydrometbasename['value']
         else:
@@ -619,6 +616,24 @@ class MetProcessor(Aux, InOut):
         L = 2.453 * 10 ** 6  # Latent heat of vaporization (J/kg)
         Rv = 461  # Gas constant for moist air (J/kg-K)
 
+        # Wind Profile Constants (Assuming Standard Met Station i.e. Short Grass)
+        # Not something we are letting users control for now. High chance for error. 
+        # This adjustment is less of a user parameter and more so unit conversion.
+        # NLDAS provides wind at 10m. tRIBS expects wind at 2m over a generic surface (usually grass),
+        # which it then adjusts internally based on Land Use.
+        # Reference: FAO-56 / Maidment (1993)
+        z_meas = 10.0   # Height of NLDAS measurement
+        z_dest = 2.0    # Height required by tRIBS
+        
+        # Roughness length (z0) for short grass is approx 0.10m.
+        # Displacement height (d) is negligible for short grass or approx 2/3 * z0. 
+        # Using a standard simplified log profile with z0=0.10 and d=0.07:
+        z0_ref = 0.015
+        d = 0.07
+
+        # Scaling factor = ln(z_dest / z0) / ln(z_meas / z0)
+        wind_scale_factor = np.log((z_dest - d) / z0_ref) / np.log((z_meas - d) / z0_ref)
+
         for df in list_dfs:
             # Apply GMT offset to the index
             df.index = df.index + pd.to_timedelta(gmt, unit='h')
@@ -637,10 +652,11 @@ class MetProcessor(Aux, InOut):
             df['NR'] = 9999.99
             df['psurf'] *= 0.01  # Convert pressure from Pa to hPa
 
-            df['US'] = (df['wind_u'] ** 2 + df['wind_v'] ** 2) ** 0.5  # Wind speed
-            # convert to 2 m surface wind speed
-            df['US'] = df['US'] * (np.log((2 - displacement_height) / roughness_length)) / (
-                np.log((10 - displacement_height) / roughness_length))
+            # Calculate Wind Speed
+            # Magnitude of vector
+            df['US'] = (df['wind_u'] ** 2 + df['wind_v'] ** 2) ** 0.5
+            # Scale 10m -> 2m
+            df['US'] = df['US'] * wind_scale_factor
 
             df['TA'] = df['temp'] - 273.15  # Temperature in Celsius
             df['e_sat'] = 6.11 * np.exp(
