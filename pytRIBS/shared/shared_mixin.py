@@ -396,11 +396,6 @@ class Shared:
 
         return dyn_data
 
-    # Deprecated Wrapper
-    def merge_parallel_spatial_files(self, *args, **kwargs):
-        """Deprecated: Use get_spatial_files instead."""
-        return self.get_spatial_files(*args, **kwargs)
-
     def mesh2vtk(self, outfile):
         """
         Converts mesh data files into a VTK file format for visualization.
@@ -677,7 +672,7 @@ class Shared:
             If there are issues merging files or reading Voronoi data.
         """
 
-        # 1. Read Integrated Spatial Variables (*_00i)
+        # Read Integrated Spatial Variables (*_00i)
         # We rely on get_spatial_files to check self.options['parallelmode']
         runtime_val = int(self.options['runtime']['value'])
         
