@@ -22,6 +22,19 @@ class MetProcessor(Aux, InOut):
     """
     Framework for Met Class. See classes.py
     """
+    def __init__(self):
+        # This calls Meta.__init__() and initializes self.meta
+        super().__init__() 
+        
+        # Initialize the dictionaries used in run_met_workflow 
+        # to prevent errors when run in a standalone script
+        if not hasattr(self, 'hydrometstations'):
+            self.hydrometstations = {'value': None}
+        if not hasattr(self, 'hydrometbasename'):
+            self.hydrometbasename = {'value': None}
+        if not hasattr(self, 'gaugestations'):
+            self.gaugestations = {'value': None}
+
     def polygon_centroid_to_geographic(self, polygon, utm_crs=None, geographic_crs="EPSG:4326"):
         "Helper function from `Aux` Class"
         lat,lon, gmt = Aux.polygon_centroid_to_geographic(self,polygon,utm_crs=utm_crs,geographic_crs=geographic_crs)
