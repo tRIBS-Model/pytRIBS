@@ -768,7 +768,6 @@ class MetProcessor(Aux, InOut):
         - A cache is used for the NLDAS-2 data retrieval to improve efficiency.
         """
 
-        met_dir = os.path.dirname(self.hydrometstations['value'])
         lat, lon, gmt = self.polygon_centroid_to_geographic(watershed)
         x, y = watershed.centroid.x, watershed.centroid.y
         centroids = [(x,y)]
