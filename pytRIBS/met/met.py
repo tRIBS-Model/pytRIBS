@@ -312,7 +312,7 @@ class MetProcessor(Aux, InOut):
 
         # TODO: Need to make it so that this can be cached or passed in as a variable rather than downloaded.
 
-        url = "https://ldas.gsfc.nasa.gov/sites/default/files/ldas/NLDAS-2/NLDAS_elevation.nc4"
+        url = "https://ldas.gsfc.nasa.gov/sites/default/files/ldas/nldas/NLDAS_elevation.nc4"
 
         try:
             # Send a GET request to the URL
@@ -746,7 +746,7 @@ class MetProcessor(Aux, InOut):
         self.write_met_sdf(met_path, met_sdf_list)
         self.write_precip_sdf(precip_sdf_list, precip_path)
 
-    def run_met_workflow(self, watershed, begin, end, elev):
+    def run_met_workflow(self, watershed, begin, end, elev=None):
         """
         Execute the meteorological data workflow for a given watershed.
 
@@ -785,6 +785,13 @@ class MetProcessor(Aux, InOut):
         x, y = watershed.centroid.x, watershed.centroid.y
         centroids = [(x,y)]
 
+        if elev is None:
+            print("No elevation provided. Downloading NLDAS-2 elevation grid...")
+            ds_elev = self.get_nldas_elevation(watershed, self.meta['EPSG'])
+            elev = float(ds_elev.NLDAS_elev.sel(lon=lon, lat=lat, method='nearest').values)
+        else:
+            print(f"Using user provided elevation: {elev}m")
+    
         # Adjust dates to aquire an extra day for GMT offset
         download_begin = (pd.to_datetime(begin) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
         download_end = (pd.to_datetime(end) + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
