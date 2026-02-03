@@ -11,73 +11,197 @@ import requests
 from io import BytesIO
 from pytRIBS.shared.inout import InOut
 from pytRIBS.shared.aux import Aux
+import io
+import requests
+from netrc import netrc
+from requests.auth import HTTPBasicAuth
+import earthaccess
 
 
 class MetProcessor(Aux, InOut):
     """
     Framework for Met Class. See classes.py
     """
+    def __init__(self):
+        # This calls Meta.__init__() and initializes self.meta
+        super().__init__() 
+        
+        # Initialize the dictionaries used in run_met_workflow 
+        # to prevent errors when run in a standalone script
+        if not hasattr(self, 'hydrometstations'):
+            self.hydrometstations = {'value': None}
+        if not hasattr(self, 'hydrometbasename'):
+            self.hydrometbasename = {'value': None}
+        if not hasattr(self, 'gaugestations'):
+            self.gaugestations = {'value': None}
+
     def polygon_centroid_to_geographic(self, polygon, utm_crs=None, geographic_crs="EPSG:4326"):
         "Helper function from `Aux` Class"
         lat,lon, gmt = Aux.polygon_centroid_to_geographic(self,polygon,utm_crs=utm_crs,geographic_crs=geographic_crs)
         return lat, lon, gmt
-    def get_nldas_point(self, centroids, begin, end, epsg=None, **hyriver_env_vars):
+    
+    def get_nldas_point(self, centroids, begin, end, epsg=None):
         """
-        Fetch NLDAS-2 data for a given set of coordinates and time period, with optional caching and environment variable configuration.
+        Fetch NLDAS-2 forcing data from NASA Giovanni for specific coordinates.
+        
+        This method handles authentication via Earthdata (creating a .netrc file if needed),
+        retrieves a session token, and downloads timeseries data directly from the Giovanni API.
 
-        This method fetches NLDAS-2 data for specified centroids and a time range, utilizing the pynldas2 library. It supports
-        the use of environment variables for caching and verbosity settings and can handle optional CRS transformation.
+        Prerequisites:
+        1. An Earthdata Login account.
+        2. The 'NASA GESDISC DATA ARCHIVE' application must be authorized in your Earthdata profile.
 
         Parameters
         ----------
-        centroids : list or pandas.DataFrame
-            A list or DataFrame of coordinates (longitude, latitude) for which NLDAS-2 data is being requested.
+        centroids : list of tuples or list of lists
+            Coordinates [(x, y), ...] in the projection specified by 'epsg'.
         begin : str
-            The start date for the data request in 'YYYY-MM-DD' format.
+            Start date 'YYYY-MM-DD'.
         end : str
-            The end date for the data request in 'YYYY-MM-DD' format.
+            End date 'YYYY-MM-DD'.
         epsg : int, optional
-            The EPSG code for the coordinate reference system of the geometry. If not provided, defaults to the
-            EPSG code in `self.meta`.
-        **hyriver_env_vars : dict, optional
-            Additional keyword arguments representing environment variables to control request/response caching, verbosity,
-            and SSL settings. Some supported variables include:
-            - HYRIVER_CACHE_NAME: Path to the caching SQLite database for asynchronous HTTP requests.
-            - HYRIVER_CACHE_NAME_HTTP: Path to the caching SQLite database for HTTP requests.
-            - HYRIVER_CACHE_EXPIRE: Expiration time for cached requests in seconds.
-            - HYRIVER_CACHE_DISABLE: Disable reading/writing from/to the cache.
-            - HYRIVER_SSL_CERT: Path to an SSL certificate file.
+            The EPSG code of the input centroids. Defaults to self.meta['EPSG'] if None.
 
         Returns
         -------
         pandas.DataFrame
-            The dataset containing the NLDAS-2 data for the specified coordinates and time period.
-
-        Raises
-        ------
-        Exception
-            If an error occurs during the data fetching process.
-
-        Notes
-        -----
-        - The function uses the `NLDAS-2.get_bycoords` method from the pynldas2 library to retrieve data.
-        - If no EPSG code is provided, the default value is taken from `self.meta['EPSG']`.
-        - Caching behavior can be controlled through environment variables, which can be passed using **hyriver_env_vars.
-        - The HyRiver library should be cited as follows:
-          Chegini T, Li H-Y, Leung LR. 2021. HyRiver: Hydroclimate Data Retriever. Journal of Open Source Software 6: 3175.
-          DOI: 10.21105/joss.03175.
+            Combined dataframe of all variables.
         """
 
-        # Set environment variables from hyriver_env_vars
-        for key, item in hyriver_env_vars.items():
-            os.environ[key] = item
+        # Informational Header
+        print("\nInitializing NLDAS Download (NASA Giovanni)")
+        print("NOTE: This workflow requires an Earthdata Login.")
+        print("CRITICAL: You must authorize the 'NASA GESDISC DATA ARCHIVE' app in your profile.")
+        print("If you see 401 errors, check your authorized apps here: https://urs.earthdata.nasa.gov/users/new\n")
 
+        # Authentication
+        # We need a username/password to get a Giovanni token.
+        # We use earthaccess to ensure the user has a .netrc file set up.
+        try:
+            # Check if credentials exist locally
+            _ = netrc().hosts['urs.earthdata.nasa.gov']
+        except (FileNotFoundError, KeyError):
+            print("(!) Earthdata credentials not found in .netrc.")
+            print("    Initiating interactive login to save credentials...")
+            earthaccess.login(strategy="interactive", persist=True)
+
+        # Retrieve credentials from the file (guaranteed to exist now)
+        try:
+            login_info = netrc().hosts['urs.earthdata.nasa.gov']
+            username, password = login_info[0], login_info[2]
+        except Exception:
+            raise PermissionError("Could not retrieve Earthdata credentials. Please ensure you have an Earthdata account.")
+
+        # Get Giovanni Session Token
+        print("Retrieving Giovanni Session Token...")
+        signin_url = "https://api.giovanni.earthdata.nasa.gov/signin"
+        
+        try:
+            token_resp = requests.get(signin_url, auth=HTTPBasicAuth(username, password))
+            token_resp.raise_for_status()
+            token = token_resp.text.replace('"', '').strip()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 401:
+                # This is the specific error for missing App Authorization
+                print("\n\033[91mAuthentication Failed (401 Unauthorized)\033[0m")
+                print("Possible causes:")
+                print("1. Invalid Username/Password")
+                print("2. Missing App Authorization")
+                print("   Action: Go to https://urs.earthdata.nasa.gov/users/new")
+                print("   Application > Authorized Apps > Approve More Applications > Authorize 'NASA GESDISC DATA ARCHIVE')")
+                print("   Once authorized try again.\n")
+                raise PermissionError("Earthdata Authorization Failed. See instructions above.") from e
+            else:
+                raise PermissionError(f"Failed to retrieve Giovanni token: {e}")
+
+        # Configuration
+        api_url = "https://api.giovanni.earthdata.nasa.gov/timeseries"
+        headers = {
+            "authorizationtoken": token,
+            "User-Agent": "pytRIBS/1.0"
+        }
+        
+        # Giovanni Variable ID Mapping
+        var_map = {
+            'NLDAS_FORA0125_H_2_0_Rainf':   'prcp',
+            'NLDAS_FORA0125_H_2_0_Tair':   'temp',
+            'NLDAS_FORA0125_H_2_0_Qair':   'humidity',
+            'NLDAS_FORA0125_H_2_0_PSurf':  'psurf',
+            'NLDAS_FORA0125_H_2_0_Wind_E': 'wind_u',
+            'NLDAS_FORA0125_H_2_0_Wind_N': 'wind_v',
+            'NLDAS_FORA0125_H_2_0_SWdown': 'rsds'
+        }
+
+        # Coordinate Transformation setup
         if epsg is None:
-            epsg = self.meta['EPSG']
-        # Fetch data using the NLDAS-2 library
-        df = nldas.get_bycoords(centroids, begin, end, crs=epsg, source='netcdf')
+            epsg = self.meta.get('EPSG', 4326) 
+            
+        transformer = None
+        if epsg != 4326:
+            transformer = pyproj.Transformer.from_crs(epsg, 4326, always_xy=True)
 
-        return df
+        # Data Retrieval Loop
+        results_list = []
+        # NLDAS should always be in UTC then we apply the timeshift elsewhere
+        time_str = f"{begin}T00:00:00/{end}T23:00:00"
+
+        for pt in centroids:
+            x, y = pt
+            if transformer:
+                lon, lat = transformer.transform(x, y)
+            else:
+                lon, lat = x, y
+            
+            location_str = f"[{lat:.4f},{lon:.4f}]"
+            print(f"Downloading NLDAS for {location_str}...")
+
+            point_dfs = []
+            
+            for giovanni_id, tribs_name in var_map.items():
+                params = {
+                    "data": giovanni_id,
+                    "time": time_str,
+                    "location": location_str,
+                    "version": "2.0"
+                }
+
+                try:
+                    r = requests.get(api_url, headers=headers, params=params)
+                    r.raise_for_status()
+                    
+                    csv_io = io.StringIO(r.text)
+                    header_line = 0
+                    for i, line in enumerate(csv_io):
+                        if line.startswith("Timestamp") or line.startswith("Time"):
+                            header_line = i
+                            break
+                    csv_io.seek(0)
+                    
+                    df = pd.read_csv(csv_io, skiprows=header_line)
+                    
+                    if len(df.columns) >= 2:
+                        val_col = df.columns[1] 
+                        df = df.rename(columns={df.columns[0]: 'time', val_col: tribs_name})
+                        df['time'] = pd.to_datetime(df['time'])
+                        df.set_index('time', inplace=True)
+                        point_dfs.append(df[[tribs_name]])
+                        
+                except Exception as e:
+                    print(f"  - Error fetching {tribs_name}: {e}")
+
+            if point_dfs:
+                station_df = pd.concat(point_dfs, axis=1)
+                results_list.append(station_df)
+            else:
+                print(f"Warning: No valid data found for {location_str}")
+
+        if not results_list:
+            raise RuntimeError("NLDAS download failed: No data returned.")
+
+        if len(results_list) == 1:
+            return results_list[0]
+        else:
+            return pd.concat(results_list)
 
     @staticmethod
     def get_nldas_geom(geom, begin, end, epsg, write_path=None, **hyriver_env_vars):
@@ -188,7 +312,7 @@ class MetProcessor(Aux, InOut):
 
         # TODO: Need to make it so that this can be cached or passed in as a variable rather than downloaded.
 
-        url = "https://ldas.gsfc.nasa.gov/sites/default/files/ldas/NLDAS-2/NLDAS_elevation.nc4"
+        url = "https://ldas.gsfc.nasa.gov/sites/default/files/ldas/nldas/NLDAS_elevation.nc4"
 
         try:
             # Send a GET request to the URL
@@ -468,9 +592,6 @@ class MetProcessor(Aux, InOut):
         geographic coordinates (longitude, latitude) need to be converted to UTM coordinates using the provided EPSG code.
         """
 
-        roughness_length = 0.5  # these should probably be made accessible to user, but for now hidden as met still needs refinemet.
-        displacement_height = 0.05
-
         if prefix is None and self.hydrometbasename['value'] is not None:
             prefix = self.hydrometbasename['value']
         else:
@@ -508,6 +629,24 @@ class MetProcessor(Aux, InOut):
         L = 2.453 * 10 ** 6  # Latent heat of vaporization (J/kg)
         Rv = 461  # Gas constant for moist air (J/kg-K)
 
+        # Wind Profile Constants (Assuming Standard Met Station i.e. Short Grass)
+        # Not something we are letting users control for now. High chance for error. 
+        # This adjustment is less of a user parameter and more so unit conversion.
+        # NLDAS provides wind at 10m. tRIBS expects wind at 2m over a generic surface (usually grass),
+        # which it then adjusts internally based on Land Use.
+        # Reference: FAO-56 / Maidment (1993)
+        z_meas = 10.0   # Height of NLDAS measurement
+        z_dest = 2.0    # Height required by tRIBS
+        
+        # Roughness length (z0) for short grass is approx 0.10m.
+        # Displacement height (d) is negligible for short grass or approx 2/3 * z0. 
+        # Using a standard simplified log profile with z0=0.10 and d=0.07:
+        z0_ref = 0.015
+        d = 0.07
+
+        # Scaling factor = ln(z_dest / z0) / ln(z_meas / z0)
+        wind_scale_factor = np.log((z_dest - d) / z0_ref) / np.log((z_meas - d) / z0_ref)
+
         for df in list_dfs:
             # Apply GMT offset to the index
             df.index = df.index + pd.to_timedelta(gmt, unit='h')
@@ -526,10 +665,11 @@ class MetProcessor(Aux, InOut):
             df['NR'] = 9999.99
             df['psurf'] *= 0.01  # Convert pressure from Pa to hPa
 
-            df['US'] = (df['wind_u'] ** 2 + df['wind_v'] ** 2) ** 0.5  # Wind speed
-            # convert to 2 m surface wind speed
-            df['US'] = df['US'] * (np.log((2 - displacement_height) / roughness_length)) / (
-                np.log((10 - displacement_height) / roughness_length))
+            # Calculate Wind Speed
+            # Magnitude of vector
+            df['US'] = (df['wind_u'] ** 2 + df['wind_v'] ** 2) ** 0.5
+            # Scale 10m -> 2m
+            df['US'] = df['US'] * wind_scale_factor
 
             df['TA'] = df['temp'] - 273.15  # Temperature in Celsius
             df['e_sat'] = 6.11 * np.exp(
@@ -606,7 +746,7 @@ class MetProcessor(Aux, InOut):
         self.write_met_sdf(met_path, met_sdf_list)
         self.write_precip_sdf(precip_sdf_list, precip_path)
 
-    def run_met_workflow(self, watershed, begin, end, elev):
+    def run_met_workflow(self, watershed, begin, end, elev=None):
         """
         Execute the meteorological data workflow for a given watershed.
 
@@ -641,17 +781,22 @@ class MetProcessor(Aux, InOut):
         - A cache is used for the NLDAS-2 data retrieval to improve efficiency.
         """
 
-        met_dir = os.path.dirname(self.hydrometstations['value'])
         lat, lon, gmt = self.polygon_centroid_to_geographic(watershed)
         x, y = watershed.centroid.x, watershed.centroid.y
         centroids = [(x,y)]
 
+        if elev is None:
+            print("No elevation provided. Downloading NLDAS-2 elevation grid...")
+            ds_elev = self.get_nldas_elevation(watershed, self.meta['EPSG'])
+            elev = float(ds_elev.NLDAS_elev.sel(lon=lon, lat=lat, method='nearest').values)
+        else:
+            print(f"Using user provided elevation: {elev}m")
+    
         # Adjust dates to aquire an extra day for GMT offset
         download_begin = (pd.to_datetime(begin) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
         download_end = (pd.to_datetime(end) + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
 
-        nldas_df = self.get_nldas_point(centroids, download_begin, download_end, epsg=self.meta['EPSG'],
-                                        HYRIVER_CACHE_NAME=f"{met_dir}/cache/aiohttp_cache.sqlite")
+        nldas_df = self.get_nldas_point(centroids, download_begin, download_end, epsg=self.meta['EPSG'])
         coords = [lon, x, lat, y, elev]
         self.convert_and_write_nldas_timeseries([nldas_df.copy()],[coords], gmt,
                                                 orig_begin=begin, orig_end=end)

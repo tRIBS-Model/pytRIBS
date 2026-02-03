@@ -14,6 +14,30 @@ A full tRIBS model setup, simulation, and analysis is provided [here.](https://z
 ## Release/Version Notes
 PytRIBS uses semantic versioning. Currently, we are in the initial development phase--anything MAY change at any time and
 this package SHOULD NOT be considered stable.
+
+## Version 0.7.0 (02/03/2026)
+This release introduces a set of relatively small changes that fix existing points of confusion or bugs in the code. Additionally, updates to the meteorological workflow to handle changes to the NASA API for downloading NLDAS-2 data.
+
+### Added
+* Added new optional input to the run_soil_workflow for downloading POLARIS gridded soil data rather than the ISRIC dataset. Can be controlled with the `source` argument but defaults to ISRIC if not specified. This dataset follows the same general workflow but does not require applying ROSETTA3 like with the ISRIC data. ([#26](https://github.com/tRIBS-Model/pytRIBS/pull/26))
+
+### Changed / Improved
+* **Spatial Outputs** ([#28](https://github.com/tRIBS-Model/pytRIBS/pull/28))
+    * Addressed limitation of pytRIBS workflow only able to process tRIBS spatial outputs if the model was ran in parallel mode.
+    * Renamed merge_parallel_spatial_files to get_spatial_files to reflect its expanded capability.
+    * The workflow will now automatically detect from the input file if model was ran in serial or parallel mode for processing the outputs.
+* **NLDAS-2 Data Download** ([#27](https://github.com/tRIBS-Model/pytRIBS/pull/29))
+    * Refactored `get_nldas_point` to account for changes to NASA API. 
+    * Removed use of `pynldas2` dependency and added new `earthaccess` dependency that handles the API token for accessing NLDAS-2 data. Note that an earthdata account is now required to download the data.
+* **Windspeed Correction** ([#29](https://github.com/tRIBS-Model/pytRIBS/pull/29))
+    * Updated code related to converting 10m windspeeds from NLDAS-2 data to 2m height required by tRIBS.
+    * All values for the parameters in the conversion now follow the FAO-56 / ASCE standard constants for a standard reference surface of short grass. 
+* **Hydraulic Conductivity Decay**
+    * Updated the method for calculating the hydraulic conductivity decay coefficient to better represent its purpose as the decay rate of the surface soil
+* **Technical Cleanup**
+    * Loosen package dependencies in `pyproject.toml` to resolve version conflicts.
+    * Remove redundant code and improved class initialization in `met.py` to make the code more effective as a standalone workflow.
+      
 ### Verison 0.6.0 (11/20/2025)
 * Fixed bug in reading landuse table (can only use for model or land class though).
 * Added optional input to write_ascii() that allows user to specify number of decimal places in output raster.

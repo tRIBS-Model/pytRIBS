@@ -13,8 +13,11 @@ from pytRIBS.shared.aux import Aux
 from timezonefinder import TimezoneFinder
 from datetime import datetime
 import rasterio
+from rasterio.transform import from_bounds
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 import pytz
+import requests
+from rasterio.merge import merge
 
 
 class SoilProcessor:
@@ -750,7 +753,311 @@ class SoilProcessor:
             for soil_property, name in zip(soil_prop, output_files):
                 soi_raster = {'data': soil_property, 'profile': profile}
                 self._write_ascii(soi_raster, name)
+    
+    def process_polaris_parameters(self, grid_input, output_files, ks_only=False):
+        """
+        Writes ASCII grids for Ks, theta_s, theta_r, psib, and m by converting POLARIS 
+        gridded soil data into tRIBS-compatible formats and units.
 
+        Parameters
+        ----------
+        grid_input : list of dict or str
+            If a dictionary list, each dictionary should contain the keys "type" and "path" for each soil property.
+            The format of the dictionary list follows this structure:
+
+            ::
+
+                [{'type': 'ksat', 'path': 'path/to/ksat_grid'},
+                 {'type': 'theta_s', 'path': 'path/to/theta_s_grid'},
+                 {'type': 'theta_r', 'path': 'path/to/theta_r_grid'},
+                 {'type': 'lambda', 'path': 'path/to/lambda_grid'},
+                 {'type': 'hb', 'path': 'path/to/hb_grid'}]
+
+            If a string is provided, it is treated as the path to a JSON configuration file.
+
+        output_files : list
+            List of output file names for different soil properties. 
+            If `ks_only=False`, the list must have exactly 5 file names in this order:
+            ['Ks', 'theta_r', 'theta_s', 'psib', 'm'].
+            If `ks_only=True`, the list should contain only 1 file name for Ks.
+
+        ks_only : bool, optional
+            If `True`, only write rasters for Ks. This is useful when processing multiple depths 
+            specifically for the `compute_ks_decay` function. Default is `False`.
+
+        Notes
+        -----
+        This function performs specific physical conversions required to translate POLARIS 
+        probabilistic soil data to tRIBS inputs:
+
+        1. **Ksat**: Converted from log10(cm/hr) to arithmetic mm/hr.
+        2. **Bubbling Pressure (hb/psib)**: Converted from log10(kPa) to arithmetic mm H2O.
+
+        Examples
+        --------
+        To write all soil property grids for tRIBS:
+
+        >>> grid_input = [{'type': 'ksat', 'path': 'polaris/ksat_0-5_mean.tif'},
+        ...               {'type': 'theta_s', 'path': 'polaris/thetas_0-5_mean.tif'},
+        ...               {'type': 'theta_r', 'path': 'polaris/thetar_0-5_mean.tif'},
+        ...               {'type': 'lambda', 'path': 'polaris/lamda_0-5_mean.tif'},
+        ...               {'type': 'hb', 'path': 'polaris/hb_0-5_mean.tif'}]
+        >>> output = ['Ks.asc', 'theta_r.asc', 'theta_s.asc', 'psib.asc', 'm.asc']
+        >>> obj.process_polaris_parameters(grid_input, output)
+
+        To write only Ks raster (e.g., for deep layers):
+
+        >>> grid_input = [{'type': 'ksat', 'path': 'polaris/ksat_60-100_mean.tif'}]
+        >>> output = ['Ks_60-100cm.asc']
+        >>> obj.process_polaris_parameters(grid_input, output, ks_only=True)
+        """
+        
+        # Read grids based on input dict
+        grid_data = {}
+        profile = None
+        
+        for g in grid_input:
+            # type maps to POLARIS var name
+            g_type = g['type']
+            path = g['path']
+            print(f"Processing POLARIS parameter {g_type} from {path}")
+            
+            geo_tiff = self._read_ascii(path)
+            grid_data[g_type] = geo_tiff['data']
+            if profile is None:
+                profile = geo_tiff['profile']
+
+        size = grid_data['ksat'].shape
+        
+        # Initialize outputs
+        ks = np.zeros(size)
+        theta_r = np.zeros(size)
+        theta_s = np.zeros(size)
+        psib = np.zeros(size)
+        m = np.zeros(size)
+        
+        # Perform Unit Conversions
+        # Ksat: POLARIS is log10(cm/hr). tRIBS needs mm/hr.
+        # Formula: 10^(val) * 10
+        ks = (10 ** grid_data['ksat']) * 10.0
+        
+        if not ks_only:
+            # Theta S / R: Direct match (m3/m3)
+            theta_s = grid_data['theta_s']
+            theta_r = grid_data['theta_r']
+            
+            # Pore Index (lambda/m). 
+            # POLARIS provides 'lambda' for the Brooks-Corey model. Which is what tRIBS needs
+            m = grid_data['lambda']
+
+            # Bubbling Pressure (Psi_b / hb).
+            # POLARIS v1.0 'hb' is log10(pressure in kPa).
+            # tRIBS needs -mm head.
+            # 1 kPa ~= 101.97 mm H2O.
+            # Formula: 10^(val) * 101.97
+            psib = -(10 ** grid_data['hb']) * 101.97
+
+        # Write Outputs
+        # Order expected: [Ks, theta_r, theta_s, psib, m]
+        soil_prop = [ks, theta_r, theta_s, psib, m]
+
+        if ks_only:
+            soi_raster = {'data': ks, 'profile': profile}
+            self._write_ascii(soi_raster, output_files[0])
+        else:
+            for soil_property, name in zip(soil_prop, output_files):
+                soi_raster = {'data': soil_property, 'profile': profile}
+                self._write_ascii(soi_raster, name)
+
+    def get_polaris_grids(self, bbox, depths, variables, stats, replace=False):
+        """
+        Retrieves data from the POLARIS database (Duke University), saves it as GeoTIFF files, and returns a list of paths to the downloaded files.
+
+        Parameters
+        ----------
+        bbox : list of float
+            The bounding box coordinates in the format [x1, y1, x2, y2], where:
+            - x1 : float, minimum x-coordinate (longitude or easting)
+            - y1 : float, minimum y-coordinate (latitude or northing)
+            - x2 : float, maximum x-coordinate (longitude or easting)
+            - y2 : float, maximum y-coordinate (latitude or northing)
+        depths : list of str
+            List of soil depths to retrieve data for. Each depth should be specified as a string in the format 'depth_min-depth_max', e.g., '0-5cm', '5-15cm'.
+        soil_vars : list of str
+            List of soil variables to retrieve from the HTTP site. Examples include 'bd' (bulk density), 'clay', 'sand', 'silt', etc.
+            For a full list of variables, see the readme documentation at http://hydrology.cee.duke.edu/POLARIS/PROPERTIES/v1.0/Readme.
+        stats : list of str
+            List of statistics to compute for each variable and depth. Typically includes 'mean', but other quantiles or statistics may be available.
+            For more information on prediction quantiles, see the ISRIC SoilGrids FAQ: https://www.isric.org/explore/soilgrids/faq-soilgrids.
+
+        Returns
+        -------
+        list of str
+            A list of file paths to the downloaded GeoTIFF files.
+
+        Examples
+        --------
+        To retrieve soil data for specific depths and variables within a bounding box:
+
+        >>> bbox = [387198, 3882394, 412385, 3901885]  # x1, y1, x2, y2 (e.g., UTM coordinates)
+        >>> depths = ['0-5cm', '5-15cm', '15-30cm', '30-60cm', '60-100cm']
+        >>> soil_vars = ['bdod', 'clay', 'sand', 'silt']
+        >>> stats = ['mean']
+        >>> file_paths = retrieve_soil_data(bbox, depths, soil_vars, stats)
+        >>> print(file_paths)
+        ['path/to/downloaded_file_1.tif', 'path/to/downloaded_file_2.tif', ...]
+        """
+
+        target_epsg = self.meta['EPSG']
+        if target_epsg is None:
+            print("No EPSG code found. Please update model attribute .meta['EPSG'].")
+            return
+
+        # Sanitize EPSG code
+        match = re.search(r'(\d+)', str(target_epsg))
+        if match:
+            target_epsg_code = int(match.group(1))
+        else:
+            return
+
+        data_dir = 'polaris'
+        if not os.path.exists(data_dir):
+            os.makedirs(data_dir)
+
+        # Transform Model BBOX to WGS84 to identify which tiles to download (POLARIS available in 1deg tiles)
+        transformer = Transformer.from_crs(f"EPSG:{target_epsg_code}", "EPSG:4326", always_xy=True)
+        minx, miny, maxx, maxy = bbox
+        lon_min, lat_min = transformer.transform(minx, miny)
+        lon_max, lat_max = transformer.transform(maxx, maxy)
+
+        # Identify Integer Tile Ranges
+        lats = range(int(np.floor(lat_min)), int(np.floor(lat_max)) + 1)
+        lons = range(int(np.floor(lon_min)), int(np.floor(lon_max)) + 1)
+
+        # Base configuration
+        base_domain = "hydrology.cee.duke.edu"
+        base_path = "/POLARIS/PROPERTIES/v1.0"
+        
+        session = requests.Session()
+        retries = requests.adapters.Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+        session.mount('http://', requests.adapters.HTTPAdapter(max_retries=retries))
+        session.mount('https://', requests.adapters.HTTPAdapter(max_retries=retries))
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+
+        output_files = []
+        print('Downloading and processing data from POLARIS...')
+
+        for var in variables:
+            for depth in depths:
+                remote_depth = depth.replace('-', '_').replace('cm', '')
+                stat_val = stats[0] if stats else 'mean'
+                
+                final_filename = f'{var}_{depth}_{stat_val}.tif'
+                final_path = os.path.join(data_dir, final_filename)
+                output_files.append(final_filename)
+
+                if os.path.exists(final_path) and not replace:
+                    continue
+
+                tile_files = []
+                for lat in lats:
+                    for lon in lons:
+                        lat_str = f"lat{lat}{lat + 1}"
+                        lon_str = f"lon{lon}{lon + 1}"
+                        remote_fname = f"{lat_str}_{lon_str}.tif"
+                        temp_tile_path = os.path.join(data_dir, f"temp_{var}_{depth}_{lat}_{lon}.tif")
+                        
+                        if os.path.exists(temp_tile_path) and os.path.getsize(temp_tile_path) > 0:
+                             tile_files.append(temp_tile_path)
+                             continue
+
+                        url = f"http://{base_domain}{base_path}/{var}/{stat_val}/{remote_depth}/{remote_fname}"
+                        
+                        try:
+                            r = session.get(url, headers=headers, stream=True, timeout=30)
+                            if r.status_code == 200:
+                                with open(temp_tile_path, 'wb') as f:
+                                    for chunk in r.iter_content(chunk_size=8192):
+                                        f.write(chunk)
+                                tile_files.append(temp_tile_path)
+                            elif r.status_code == 404:
+                                pass
+                        except Exception:
+                            pass
+
+                if not tile_files:
+                    print(f"Warning: No tiles successfully downloaded for {var} at {depth}.")
+                    continue
+
+                # Mosaic, Clip, and Reproject
+                try:
+                    src_files_to_mosaic = [rasterio.open(fp) for fp in tile_files]
+                    mosaic, out_trans = merge(src_files_to_mosaic)
+                    
+                    out_meta = src_files_to_mosaic[0].meta.copy()
+                    out_meta.update({
+                        "driver": "GTiff",
+                        "height": mosaic.shape[1],
+                        "width": mosaic.shape[2],
+                        "transform": out_trans,
+                        "crs": "EPSG:4326"
+                    })
+
+                    mosaic_path = os.path.join(data_dir, f"temp_mosaic_{var}_{depth}.tif")
+                    with rasterio.open(mosaic_path, "w", **out_meta) as dest:
+                        dest.write(mosaic)
+
+                    for src in src_files_to_mosaic:
+                        src.close()
+
+                    # Instead of transforming the entire mosaic, we define the transform
+                    # based on the requested bbox.
+                    
+                    with rasterio.open(mosaic_path) as src:
+                        # Define target resolution (POLARIS is ~30m)
+                        target_res = 30.0 
+                        
+                        # BBox is [minx, miny, maxx, maxy]
+                        dst_width = int((bbox[2] - bbox[0]) / target_res)
+                        dst_height = int((bbox[3] - bbox[1]) / target_res)
+
+                        # Create transform strictly for the BBOX
+                        dst_transform = from_bounds(bbox[0], bbox[1], bbox[2], bbox[3], dst_width, dst_height)
+
+                        kwargs = src.meta.copy()
+                        kwargs.update({
+                            'crs': f'EPSG:{target_epsg_code}',
+                            'transform': dst_transform,
+                            'width': dst_width,
+                            'height': dst_height
+                        })
+
+                        with rasterio.open(final_path, 'w', **kwargs) as dst:
+                            reproject(
+                                source=rasterio.band(src, 1),
+                                destination=rasterio.band(dst, 1),
+                                src_transform=src.transform,
+                                src_crs=src.crs,
+                                dst_transform=dst_transform,
+                                dst_crs=f'EPSG:{target_epsg_code}',
+                                resampling=Resampling.nearest
+                            )
+                    
+                    if os.path.exists(mosaic_path):
+                        os.remove(mosaic_path)
+
+                except Exception as e:
+                    print(f"Error processing {var} {depth}: {e}")
+
+                for tf in tile_files:
+                    if os.path.exists(tf):
+                        os.remove(tf)
+
+        return output_files
+    
     def compute_ks_decay(self, grid_input, output=None):
         """
         Produces a raster for the conductivity decay parameter `f`, following Ivanov et al., 2004.
@@ -863,20 +1170,46 @@ class SoilProcessor:
                     except ValueError:
                         raise ValueError("Input data must be convertible to float")
 
-                    k0 = y[0]
+                    k0 = y[0] # The surface observed value
 
-                    # define exponential decay function, Ivanov et al. (2004) eqn 17
-                    decay = lambda x, f, k=k0: k * (f * x / (np.exp(f * x) - 1.0))
+                    # Define exponential decay function, Ivanov et al. (2004) eqn 17
+                    # We define the function such that K0 is hardcoded because it's the y intercept
+                    # The optimizer can only change 'f'.
+                    def decay_fixed_intercept(x, f):
+                        # Handle x=0 case to avoid division by zero or instability
+                        # Ivanov function limit as x->0 is k0
+                        
+                        # Calculation: K = K0 * ( (f*z) / (exp(f*z) - 1) )
+                        # To prevent div/0 errors when x is 0 or f is very small:
+                        term = np.zeros_like(x)
+                        
+                        # For x > 0 (Masking 0 values for safe calculation)
+                        mask = (x > 1e-6) 
+                        
+                        if np.any(mask):
+                            val = f * x[mask]
+                            # Standard Ivanov Formula
+                            term[mask] = k0 * (val / (np.exp(val) - 1.0))
+                        
+                        # For x near 0, the limit is k0
+                        term[~mask] = k0
+                        
+                        return term
 
-                    # perform curve fitting, set limits on f and surface Ksat for stability
-                    minf, maxf = 1E-7, k0 - 1E-5
-                    minks = 1
+                    # Bounds for f only
+                    minf, maxf = 1E-7, 1.0  # Upper bound 1.0 is usually sufficient for soil
 
-                    param, param_cov = curve_fit(decay, depth_vec, y, bounds=([minf, maxf], [minks, k0]))
-
-                    # Write Curve fitting results to grid
-                    f_grid[i, j] = param[0]
-                    fcov[i, j] = param_cov[0, 0]
+                    try:
+                        # We only optimize for 'f', so p0 (initial guess) is length 1
+                        param, param_cov = curve_fit(decay_fixed_intercept, depth_vec, y, p0=[0.005], bounds=([minf], [maxf]))
+                        # Write Curve fitting results to grid
+                        f_grid[i, j] = param[0]
+                        fcov[i, j] = param_cov[0, 0]
+                        
+                    except RuntimeError:
+                        # If fit fails, default to a small decay or nodata
+                        f_grid[i, j] = 0.0001 
+                        fcov[i, j] = -9999
 
         f_raster = {'data': f_grid, 'profile': profile}
         self._write_ascii(f_raster, output_file)
@@ -885,7 +1218,7 @@ class SoilProcessor:
         lat,lon, gmt = Aux.polygon_centroid_to_geographic(self,polygon,utm_crs=utm_crs,geographic_crs=geographic_crs)
         return lat, lon, gmt
 
-    def run_soil_workflow(self, watershed, output_dir):
+    def run_soil_workflow(self, watershed, output_dir, source='ISRIC'):
         """
         Executes the soil processing workflow for the given watershed.
 
@@ -900,6 +1233,9 @@ class SoilProcessor:
             determining the spatial extent of the data.
         output_dir : str
             The directory where output files will be saved.
+        source : str
+            Specifies the source of gridded soil data. Currently there are two options: ISRIC or POLARIS,
+            defaults to ISRIC.
 
         Returns
         -------
@@ -935,51 +1271,119 @@ class SoilProcessor:
         """
 
         bounds = watershed.bounds
-
         bbox = [bounds[0], bounds[1], bounds[2], bounds[3]]
-        depths = ['0-5cm', '5-15cm', '15-30cm', '30-60cm', '60-100cm']
-        soil_vars = ['sand', 'silt', 'clay', 'bdod', 'wv0033', 'wv1500']  # note order is important for processing data
+        
+        # All depths needed for Ksat / Decay calculation
+        depths_all = ['0-5cm', '5-15cm', '15-30cm', '30-60cm', '60-100cm']
+        # Surface depth for static parameters
+        depth_surface = ['0-5cm']
+
         tribsvars = ['Ks', 'theta_r', 'theta_s', 'psib', 'm']
         stat = ['mean']
 
         init_dir = os.getcwd()
         os.chdir(output_dir)
 
-        files = self.get_soil_grids(bbox, depths, soil_vars, stat)
-        files = [f'sg250/{f}' for f in files]
+        # Download Grids (Optimized for Source)
+        files_to_process = []
+        folder = ''
 
-        self._fillnodata(files, resample_pixel_size=250)
+        if source == 'ISRIC':
+            folder = 'sg250'
+            # ISRIC needs all variables at all depths for Rosetta
+            soil_vars = ['sand', 'silt', 'clay', 'bdod', 'wv0033', 'wv1500']
+            files = self.get_soil_grids(bbox, depths_all, soil_vars, stat)
+            files_to_process = [f'{folder}/{f}' for f in files]
 
-        for depth in depths:
-            grids = []
-            for soi_var in soil_vars:
-                grids.append({'type': soi_var, 'path': f'sg250/{soi_var}_{depth}_mean_filled.tif'})
-                out = [f'sg250/{x}_{depth}.asc' for x in tribsvars]
+        elif source == 'POLARIS':
+            folder = 'polaris'
+            
+            # Batch 1: Download KSAT for ALL depths (for decay curve)
+            print("Downloading Ksat profiles...")
+            files_ksat = self.get_polaris_grids(bbox, depths_all, ['ksat'], stat)
+            
+            # Batch 2: Download Hydraulic/Texture params for surface only
+            print("Downloading surface parameters...")
+            other_vars = ['theta_s', 'theta_r', 'lambda', 'hb', 'sand', 'clay']
+            files_others = self.get_polaris_grids(bbox, depth_surface, other_vars, stat)
+            
+            # Combine lists for cleaning
+            files_to_process = [f'{folder}/{f}' for f in files_ksat + files_others]
 
-            if '0-5' in depth:
-                self.process_raw_soil(grids, output=out)
-            else:
-                self.process_raw_soil(grids, output=out, ks_only=True)
+        else:
+            raise ValueError("Source must be 'ISRIC' or 'POLARIS'")
 
-        ks_depths = [0.0001, 50, 150, 300]
+        # Fill NoData 
+        # POLARIS is 30m, ISRIC is 250m
+        pixel_size = 250 if source == 'ISRIC' else 30 
+        self._fillnodata(files_to_process, resample_pixel_size=pixel_size)
+
+        # Process Parameters
+        for depth in depths_all:
+            out = [f'{folder}/{x}_{depth}.asc' for x in tribsvars]
+
+            if source == 'ISRIC':
+                # ISRIC logic remains: grab all inputs, run Rosetta
+                soil_vars_isric = ['sand', 'silt', 'clay', 'bdod', 'wv0033', 'wv1500']
+                grids = []
+                for soi_var in soil_vars_isric:
+                    grids.append({'type': soi_var, 'path': f'{folder}/{soi_var}_{depth}_mean_filled.tif'})
+                
+                if '0-5' in depth:
+                    self.process_raw_soil(grids, output=out)
+                else:
+                    self.process_raw_soil(grids, output=out, ks_only=True)
+            
+            elif source == 'POLARIS':
+                # POLARIS logic: Handle Surface vs Deep differently
+                
+                if '0-5' in depth:
+                    # Surface: We have ALL variables downloaded
+                    grids = []
+                    polaris_hydra_vars = ['ksat', 'theta_s', 'theta_r', 'lambda', 'hb']
+                    for p_var in polaris_hydra_vars:
+                        grids.append({'type': p_var, 'path': f'{folder}/{p_var}_{depth}_mean_filled.tif'})
+                    
+                    # Process all parameters
+                    self.process_polaris_parameters(grids, output_files=out, ks_only=False)
+                    
+                else:
+                    # Deep layers: We ONLY have Ksat downloaded
+                    grids = [{'type': 'ksat', 'path': f'{folder}/ksat_{depth}_mean_filled.tif'}]
+                    
+                    # Process only Ks (ks_only=True)
+                    # Note: We pass out[0] because out is [Ks, Tr, Ts, Pb, m]
+                    self.process_polaris_parameters(grids, output_files=[out[0]], ks_only=True)
+
+        # Compute Decay 'f'
+        # Tested fitting ks to different depth and found that using only using the 1st 3 depths 
+        # resulted in a much better fit for the regression. better captures surface decay which 
+        # is what this parameter should be representing.
+        ks_depths = [0.0001, 50, 150] 
         grid_depth = []
-
-        for cnt in range(0, 4):
-            grid_depth.append({'depth': ks_depths[cnt], 'path': f'sg250/Ks_{depths[cnt]}.asc'})
+        
+        # Mapping string depths to numeric depths for the decay function
+        # Note: Ensure these indices match depths_all: 0-5(0), 5-15(1), 15-30(2), 30-60(3)
+        for cnt in range(0, 3):
+            grid_depth.append({'depth': ks_depths[cnt], 'path': f'{folder}/Ks_{depths_all[cnt]}.asc'})
 
         ks_decay_param = 'f'
+        self.compute_ks_decay(grid_depth, output=f'{folder}/{ks_decay_param}.asc')
 
-        self.compute_ks_decay(grid_depth, output=f'sg250/{ks_decay_param}.asc')
-
-        grids = [{'type': 'sand', 'path': 'sg250/sand_0-5cm_mean_filled.tif'},
-                 {'type': 'clay', 'path': 'sg250/clay_0-5cm_mean_filled.tif'}]
-        classes = self.create_soil_map(grids, output='sg250/soil_classes.soi')
+        # Create Soil Map
+        grids = [{'type': 'sand', 'path': f'{folder}/sand_0-5cm_mean_filled.tif'},
+                 {'type': 'clay', 'path': f'{folder}/clay_0-5cm_mean_filled.tif'}]
+        
+        classes = self.create_soil_map(grids, output=f'{folder}/soil_classes.soi')
         self.write_soil_table(classes, 'soils.sdt', textures=True)
 
-        relative_path = f'{output_dir}/sg250/'
-
+        # Write soil gridded data file
+        relative_path = f'{output_dir}/{folder}/'
         scgrid_vars = ['KS', 'TR', 'TS', 'PB', 'PI', 'FD',
                        'PO']  # theta_S (TS) and porosity (PO) are assumed to be the same
+        
+        # Reset tribsvars list for config writing
+        tribsvars = ['Ks', 'theta_r', 'theta_s', 'psib', 'm']
         tribsvars.append(ks_decay_param)
         tribsvars.append('theta_s')
         ref_depth = '0-5cm'
@@ -1003,5 +1407,5 @@ class SoilProcessor:
         # update Soil Class attributes
         self.soiltablename['value'] = f'{output_dir}/soils.sdt'
         self.scgrid['value'] = f'{output_dir}/scgrid.gdf'
-        self.soilmapname['value'] = f'{output_dir}/sg250/soil_classes.soi'
+        self.soilmapname['value'] = f'{output_dir}/{folder}/soil_classes.soi'
         self.optsoiltype['value'] = 1
