@@ -36,7 +36,7 @@ dependencies = [
     "whitebox~=2.3.6",
     "xarray~=2025.4.0",
 ]
-version = "0.6.0"
+version = "0.7.0"
 
 [project.urls]
 Repository = "https://github.com/tribshms/pytRIBS"
