@@ -9,7 +9,7 @@ pytRIBS documentation is available [here.](https://pytribs.readthedocs.io/en/lat
 A full tRIBS model setup, simulation, and analysis is provided [here.](https://zenodo.org/records/13988020)
 
 ## Known Issues
-* As of October 2025 the package, pynldas2 for downloading NLDAS2 timeseries is no longer functional. This breaks the meteorological workflow in pytRIBS for time being until the package is updated to work with the new API.
+* The meteorological workflow in pytRIBS is now working with a new method to call the NASA Giovanni API directly.
 
 ## Release/Version Notes
 PytRIBS uses semantic versioning. Currently, we are in the initial development phase--anything MAY change at any time and
