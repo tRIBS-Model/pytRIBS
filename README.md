@@ -15,7 +15,10 @@ A full tRIBS model setup, simulation, and analysis is provided [here.](https://z
 PytRIBS uses semantic versioning. Currently, we are in the initial development phase--anything MAY change at any time and
 this package SHOULD NOT be considered stable.
 
-## Version 0.7.0 (02/03/2026)
+## Version 0.7.1 (02/03/2026)
+This release is a small update to add a missing dependency required for downloading and processing the NLDAS-2 elevation raster.
+
+### Version 0.7.0 (02/03/2026)
 This release introduces a set of relatively small changes that fix existing points of confusion or bugs in the code. Additionally, updates to the meteorological workflow to handle changes to the NASA API for downloading NLDAS-2 data.
 
 ### Added
