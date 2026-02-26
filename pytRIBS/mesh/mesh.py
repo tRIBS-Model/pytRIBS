@@ -169,7 +169,7 @@ class Preprocess:
         if output_path is None:
             output_path = f'{self.output_dir}/{name}_filled.tif'
 
-        wbt.fill_depressions(self.dem_preprocessing, os.path.abspath(output_path), fix_flats=True)
+        wbt.fill_depressions_wang_and_liu(self.dem_preprocessing, os.path.abspath(output_path), fix_flats=True)
 
         return output_path
 
