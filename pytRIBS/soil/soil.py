@@ -14,7 +14,8 @@ from timezonefinder import TimezoneFinder
 from datetime import datetime
 import rasterio
 from rasterio.transform import from_bounds
-from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio.warp import calculate_default_transform, reproject, Resampling, transform_bounds
+from rasterio.windows import from_bounds as window_from_bounds
 import pytz
 import requests
 from rasterio.merge import merge
@@ -425,6 +426,125 @@ class SoilProcessor:
 
         return files
 
+    def get_solus_grids(self, bbox, depths, variables, replace=False):
+        """
+        Download SOLUS100 gridded soil data for the watershed domain using Cloud Optimized GeoTIFF
+        (COG) windowed reads. Only the pixels covering the domain are fetched over HTTP — the full
+        CONUS extent is never downloaded. Data are reprojected to the project CRS on the fly.
+
+        Parameters
+        ----------
+        bbox : list of float
+            Bounding box [minx, miny, maxx, maxy] in the project CRS.
+        depths : list of str
+            Depth intervals to download, e.g. ['0-5cm', '5-15cm', '15-30cm', '30-60cm', '60-100cm'].
+        variables : list of str
+            SOLUS variable names, e.g. ['sandtotal', 'silttotal', 'claytotal', 'dbovendry'].
+        replace : bool, optional
+            If True, re-download files that already exist. Defaults to False.
+
+        Returns
+        -------
+        list of str
+            File names of downloaded rasters (relative to the 'solus' subdirectory).
+        """
+        target_epsg = self.meta['EPSG']
+        if target_epsg is None:
+            print("No EPSG code found. Please update model attribute .meta['EPSG'].")
+            return []
+
+        match = re.search(r'(\d+)', str(target_epsg))
+        if not match:
+            print(f"Invalid EPSG code: {target_epsg}")
+            return []
+        target_epsg_code = int(match.group(1))
+
+        data_dir = 'solus'
+        os.makedirs(data_dir, exist_ok=True)
+
+        # Map pytRIBS depth strings to SOLUS top-of-layer depth naming convention
+        depth_map = {
+            '0-5cm': '0',
+            '5-15cm': '5',
+            '15-30cm': '15',
+            '30-60cm': '30',
+            '60-100cm': '60'
+        }
+
+        base_url = 'https://storage.googleapis.com/solus100pub'
+        files = []
+
+        print('Downloading SOLUS data via COG windowed reads and reprojecting...')
+
+        for var in variables:
+            for depth in depths:
+                solus_depth = depth_map.get(depth)
+                if solus_depth is None:
+                    print(f"Depth '{depth}' not in SOLUS depth mapping, skipping.")
+                    continue
+
+                filename = f'{var}_{depth}_mean.tif'
+                final_path = os.path.join(data_dir, filename)
+                files.append(filename)
+
+                if os.path.isfile(final_path) and not replace:
+                    continue
+
+                url = f'{base_url}/{var}_{solus_depth}_cm_p.tif'
+
+                try:
+                    with rasterio.open(url) as src:
+                        # Transform domain bbox from project CRS into SOLUS CRS
+                        solus_bounds = transform_bounds(
+                            f'EPSG:{target_epsg_code}', src.crs,
+                            bbox[0], bbox[1], bbox[2], bbox[3]
+                        )
+
+                        # Compute the window — only these pixels are fetched over HTTP
+                        window = window_from_bounds(*solus_bounds, src.transform)
+                        data = src.read(1, window=window)
+                        window_transform = src.window_transform(window)
+
+                        # Calculate output transform clipped to the domain bounds
+                        dst_transform, width, height = calculate_default_transform(
+                            src.crs, f'EPSG:{target_epsg_code}',
+                            data.shape[1], data.shape[0],
+                            *solus_bounds
+                        )
+
+                        out_meta = src.meta.copy()
+                        out_meta.update({
+                            'crs': f'EPSG:{target_epsg_code}',
+                            'transform': dst_transform,
+                            'width': width,
+                            'height': height,
+                            'driver': 'GTiff'
+                        })
+
+                        destination = np.zeros((height, width), dtype=src.dtypes[0])
+                        reproject(
+                            source=data,
+                            destination=destination,
+                            src_transform=window_transform,
+                            src_crs=src.crs,
+                            dst_transform=dst_transform,
+                            dst_crs=f'EPSG:{target_epsg_code}',
+                            resampling=Resampling.nearest
+                        )
+
+                        with rasterio.open(final_path, 'w', **out_meta) as dst:
+                            dst.write(destination, 1)
+
+                        print(f"  Saved {filename}")
+
+                except Exception as e:
+                    print(f"Failed to download {var} at {depth}: {e}")
+                    if os.path.exists(final_path) and os.path.getsize(final_path) < 2000:
+                        os.remove(final_path)
+
+        print('SOLUS download complete.')
+        return files
+
     def create_soil_map(self, grid_input, output=None):
         """
         Writes out an ASCII file with soil classes assigned by soil texture classification.
@@ -531,8 +651,12 @@ class SoilProcessor:
             if grid_type == 'sand':
                 array = array / 1000 * 100  # convert SSC from g/kg to % SSC
                 texture_data[0, :, :] = array
+            elif grid_type == 'sandtotal':  # SOLUS: already in %
+                texture_data[0, :, :] = array
             elif grid_type == 'clay':
                 array = array / 1000 * 100  # convert SSC from g/kg to % SSC
+                texture_data[1, :, :] = array
+            elif grid_type == 'claytotal':  # SOLUS: already in %
                 texture_data[1, :, :] = array
 
         soil_class = np.zeros((1, size[0], size[1]), dtype=int)
@@ -753,7 +877,99 @@ class SoilProcessor:
             for soil_property, name in zip(soil_prop, output_files):
                 soi_raster = {'data': soil_property, 'profile': profile}
                 self._write_ascii(soi_raster, name)
-    
+
+    def process_solus_soil(self, grid_input, output=None, ks_only=False):
+        """
+        Writes ASCII grids for Ks, theta_s, theta_r, psib, and m from SOLUS gridded soil data
+        using ROSETTA pedotransfer functions (model type 3: SSC + bulk density).
+
+        SOLUS sand, silt, and clay are already in % mass and bulk density is in g/cm³ —
+        no unit conversion is needed before passing to ROSETTA.
+
+        Parameters
+        ----------
+        grid_input : list of dict
+            List of dicts with 'type' and 'path' keys. Expected types:
+            'sandtotal', 'silttotal', 'claytotal', 'dbovendry'.
+        output : list, optional
+            List of 5 output file names [Ks, theta_r, theta_s, psib, m].
+            Defaults to ['Ks.asc', 'theta_r.asc', 'theta_s.asc', 'psib.asc', 'm.asc'].
+        ks_only : bool, optional
+            If True, only write the Ks raster. Defaults to False.
+        """
+        if not isinstance(grid_input, list):
+            print('Invalid input format. Provide a list of dicts with type and path keys.')
+            return
+
+        grids = grid_input
+        output_files = output or ['Ks.asc', 'theta_r.asc', 'theta_s.asc', 'psib.asc', 'm.asc']
+
+        for g in grids:
+            if not os.path.isfile(g['path']):
+                raise FileNotFoundError(f"Cannot find: {g['path']} for grid type: {g['type']}")
+
+        if not ks_only and len(output_files) != 5:
+            print('Output must be a list with 5 elements.')
+            return
+
+        solus_data = None
+        size = None
+        geo_tiff = None
+
+        for cnt, g in enumerate(grids):
+            grid_type, path = g['type'], g['path']
+            print(f"Ingesting {grid_type} from: {path}")
+            geo_tiff = self._read_ascii(path)
+            array = geo_tiff['data']
+            size = array.shape
+
+            if cnt == 0:
+                solus_data = np.zeros((4, size[0], size[1]))
+
+            # SOLUS: sand/silt/clay already in %, BD already in g/cm³ — no conversion needed
+            # ROSETTA input order: [sand%, silt%, clay%, bd (g/cm³)]
+            if grid_type == 'sandtotal':
+                solus_data[0, :, :] = array
+            elif grid_type == 'silttotal':
+                solus_data[1, :, :] = array
+            elif grid_type == 'claytotal':
+                solus_data[2, :, :] = array
+            elif grid_type == 'dbovendry':
+                solus_data[3, :, :] = array
+
+        profile = geo_tiff['profile']
+
+        theta_r = np.zeros((3, *size))
+        theta_s = np.zeros((3, *size))
+        ks = np.zeros((3, *size))
+        psib = np.zeros((1, *size))
+        m = np.zeros((1, *size))
+
+        # ROSETTA version 3, model type 3 (SSC + BD) selected automatically from 4 inputs
+        for i in range(size[0]):
+            for j in range(size[1]):
+                data = [solus_data[x, i, j] for x in range(4)]
+                soil_data = SoilData.from_array([data])
+                mean, stdev, codes = rosetta(3, soil_data)
+                theta_r[:, i, j] = [mean[0, 0], stdev[0, 0], codes[0]]
+                theta_s[:, i, j] = [mean[0, 1], stdev[0, 1], codes[0]]
+                # Convert Ks from log10(cm/day) to mm/hr
+                ks[:, i, j] = [(10 ** mean[0, 4]) * 10 / 24, (10 ** stdev[0, 4]) * 10 / 24, codes[0]]
+                # Convert alpha from log10(cm⁻¹) to -1/mm
+                psib[0, i, j] = -1 / (10 ** mean[0, 2]) * 10
+                # Pore-size distribution: m = n - 1, convert from log10(n)
+                m[0, i, j] = (10 ** mean[0, 3]) - 1
+
+        soil_prop = [ks[0, :, :], theta_r[0, :, :], theta_s[0, :, :], psib[0, :, :], m[0, :, :]]
+
+        if ks_only:
+            soi_raster = {'data': soil_prop[0], 'profile': profile}
+            self._write_ascii(soi_raster, output_files[0])
+        else:
+            for soil_property, name in zip(soil_prop, output_files):
+                soi_raster = {'data': soil_property, 'profile': profile}
+                self._write_ascii(soi_raster, name)
+
     def process_polaris_parameters(self, grid_input, output_files, ks_only=False):
         """
         Writes ASCII grids for Ks, theta_s, theta_r, psib, and m by converting POLARIS 
@@ -1234,8 +1450,9 @@ class SoilProcessor:
         output_dir : str
             The directory where output files will be saved.
         source : str
-            Specifies the source of gridded soil data. Currently there are two options: ISRIC or POLARIS,
-            defaults to ISRIC.
+            Specifies the source of gridded soil data. Options: 'ISRIC', 'POLARIS', or 'SOLUS'.
+            Defaults to 'ISRIC'. SOLUS uses COG windowed reads (no full-file download) and applies
+            ROSETTA model type 3 (sand%, silt%, clay%, bulk density).
 
         Returns
         -------
@@ -1297,25 +1514,31 @@ class SoilProcessor:
 
         elif source == 'POLARIS':
             folder = 'polaris'
-            
+
             # Batch 1: Download KSAT for ALL depths (for decay curve)
             print("Downloading Ksat profiles...")
             files_ksat = self.get_polaris_grids(bbox, depths_all, ['ksat'], stat)
-            
+
             # Batch 2: Download Hydraulic/Texture params for surface only
             print("Downloading surface parameters...")
             other_vars = ['theta_s', 'theta_r', 'lambda', 'hb', 'sand', 'clay']
             files_others = self.get_polaris_grids(bbox, depth_surface, other_vars, stat)
-            
+
             # Combine lists for cleaning
             files_to_process = [f'{folder}/{f}' for f in files_ksat + files_others]
 
-        else:
-            raise ValueError("Source must be 'ISRIC' or 'POLARIS'")
+        elif source == 'SOLUS':
+            folder = 'solus'
+            soil_vars = ['sandtotal', 'silttotal', 'claytotal', 'dbovendry']
+            files = self.get_solus_grids(bbox, depths_all, soil_vars)
+            files_to_process = [f'{folder}/{f}' for f in files]
 
-        # Fill NoData 
-        # POLARIS is 30m, ISRIC is 250m
-        pixel_size = 250 if source == 'ISRIC' else 30 
+        else:
+            raise ValueError("Source must be 'ISRIC', 'POLARIS', or 'SOLUS'")
+
+        # Fill NoData
+        # POLARIS is 30m, ISRIC is 250m, SOLUS is 100m
+        pixel_size = {'ISRIC': 250, 'POLARIS': 30, 'SOLUS': 100}.get(source, 100)
         self._fillnodata(files_to_process, resample_pixel_size=pixel_size)
 
         # Process Parameters
@@ -1336,24 +1559,34 @@ class SoilProcessor:
             
             elif source == 'POLARIS':
                 # POLARIS logic: Handle Surface vs Deep differently
-                
+
                 if '0-5' in depth:
                     # Surface: We have ALL variables downloaded
                     grids = []
                     polaris_hydra_vars = ['ksat', 'theta_s', 'theta_r', 'lambda', 'hb']
                     for p_var in polaris_hydra_vars:
                         grids.append({'type': p_var, 'path': f'{folder}/{p_var}_{depth}_mean_filled.tif'})
-                    
+
                     # Process all parameters
                     self.process_polaris_parameters(grids, output_files=out, ks_only=False)
-                    
+
                 else:
                     # Deep layers: We ONLY have Ksat downloaded
                     grids = [{'type': 'ksat', 'path': f'{folder}/ksat_{depth}_mean_filled.tif'}]
-                    
+
                     # Process only Ks (ks_only=True)
                     # Note: We pass out[0] because out is [Ks, Tr, Ts, Pb, m]
                     self.process_polaris_parameters(grids, output_files=[out[0]], ks_only=True)
+
+            elif source == 'SOLUS':
+                soil_vars_solus = ['sandtotal', 'silttotal', 'claytotal', 'dbovendry']
+                grids = [{'type': v, 'path': f'{folder}/{v}_{depth}_mean_filled.tif'}
+                         for v in soil_vars_solus]
+
+                if '0-5' in depth:
+                    self.process_solus_soil(grids, output=out)
+                else:
+                    self.process_solus_soil(grids, output=out, ks_only=True)
 
         # Compute Decay 'f'
         # Tested fitting ks to different depth and found that using only using the 1st 3 depths 
@@ -1371,9 +1604,13 @@ class SoilProcessor:
         self.compute_ks_decay(grid_depth, output=f'{folder}/{ks_decay_param}.asc')
 
         # Create Soil Map
-        grids = [{'type': 'sand', 'path': f'{folder}/sand_0-5cm_mean_filled.tif'},
-                 {'type': 'clay', 'path': f'{folder}/clay_0-5cm_mean_filled.tif'}]
-        
+        if source == 'SOLUS':
+            grids = [{'type': 'sandtotal', 'path': f'{folder}/sandtotal_0-5cm_mean_filled.tif'},
+                     {'type': 'claytotal', 'path': f'{folder}/claytotal_0-5cm_mean_filled.tif'}]
+        else:
+            grids = [{'type': 'sand', 'path': f'{folder}/sand_0-5cm_mean_filled.tif'},
+                     {'type': 'clay', 'path': f'{folder}/clay_0-5cm_mean_filled.tif'}]
+
         classes = self.create_soil_map(grids, output=f'{folder}/soil_classes.soi')
         self.write_soil_table(classes, 'soils.sdt', textures=True)
 
