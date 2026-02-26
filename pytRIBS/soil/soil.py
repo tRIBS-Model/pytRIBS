@@ -545,6 +545,103 @@ class SoilProcessor:
         print('SOLUS download complete.')
         return files
 
+    def get_solus_bedrock(self, bbox, output_dir=None):
+        """
+        Download the SOLUS100 depth-to-bedrock raster, convert from cm to m, and save as an
+        ASCII raster. Uses a COG windowed read so only the domain extent is fetched.
+
+        Parameters
+        ----------
+        bbox : list of float
+            Bounding box [minx, miny, maxx, maxy] in the project CRS.
+        output_dir : str, optional
+            Directory where the output ASCII file will be saved. Defaults to 'solus'.
+
+        Returns
+        -------
+        str
+            Path to the saved ASCII raster.
+        """
+        target_epsg = self.meta['EPSG']
+        if target_epsg is None:
+            print("No EPSG code found. Please update model attribute .meta['EPSG'].")
+            return None
+
+        match = re.search(r'(\d+)', str(target_epsg))
+        if not match:
+            print(f"Invalid EPSG code: {target_epsg}")
+            return None
+        target_epsg_code = int(match.group(1))
+
+        if output_dir is None:
+            output_dir = 'solus'
+        os.makedirs(output_dir, exist_ok=True)
+
+        output_path = os.path.join(output_dir, 'bedrock_depth_m.asc')
+        url = 'https://storage.googleapis.com/solus100pub/anylithicdpt_cm_p.tif'
+
+        print('Downloading SOLUS bedrock depth via COG windowed read...')
+
+        try:
+            with rasterio.open(url) as src:
+                # Transform domain bbox from project CRS into SOLUS CRS
+                solus_bounds = transform_bounds(
+                    f'EPSG:{target_epsg_code}', src.crs,
+                    bbox[0], bbox[1], bbox[2], bbox[3]
+                )
+
+                # Compute the window — only these pixels are fetched over HTTP
+                window = window_from_bounds(*solus_bounds, src.transform)
+                data = src.read(1, window=window)
+                window_transform = src.window_transform(window)
+                nodata = src.nodata
+
+                # Reproject to project CRS
+                dst_transform, width, height = calculate_default_transform(
+                    src.crs, f'EPSG:{target_epsg_code}',
+                    data.shape[1], data.shape[0],
+                    *solus_bounds
+                )
+
+                destination = np.zeros((height, width), dtype=np.float32)
+                reproject(
+                    source=data,
+                    destination=destination,
+                    src_transform=window_transform,
+                    src_crs=src.crs,
+                    dst_transform=dst_transform,
+                    dst_crs=f'EPSG:{target_epsg_code}',
+                    resampling=Resampling.nearest
+                )
+
+                # Convert cm to m, preserving nodata cells
+                if nodata is not None:
+                    destination = np.where(destination == nodata, nodata, destination / 100.0)
+                else:
+                    destination = destination / 100.0
+
+                profile = src.meta.copy()
+                profile.update({
+                    'crs': f'EPSG:{target_epsg_code}',
+                    'transform': dst_transform,
+                    'width': width,
+                    'height': height,
+                    'dtype': 'float32',
+                    'nodata': nodata
+                })
+
+        except Exception as e:
+            print(f"Failed to download SOLUS bedrock depth: {e}")
+            return None
+
+        raster_dict = {'data': destination, 'profile': profile}
+        self._write_ascii(raster_dict, output_path)
+
+        self.bedrockfile['value'] = output_path
+        print(f"Bedrock depth saved to: {output_path}")
+
+        return output_path
+
     def create_soil_map(self, grid_input, output=None):
         """
         Writes out an ASCII file with soil classes assigned by soil texture classification.
