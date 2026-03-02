@@ -39,8 +39,8 @@ class SoilProcessor:
                        **kwargs)
 
     @staticmethod
-    def _write_ascii(raster_dict, output_file_path, dtype='float32'):
-        InOut.write_ascii(raster_dict, output_file_path, dtype)
+    def _write_ascii(raster_dict, output_file_path, dtype='float32', decimals=None):
+        InOut.write_ascii(raster_dict, output_file_path, dtype, decimals=None)
 
     @staticmethod
     def _read_ascii(file_path):
@@ -163,7 +163,7 @@ class SoilProcessor:
         water_table = np.where(data == nodata, nodata, data * fraction * 1000.0)
 
         raster_dict = {'data': water_table, 'profile': profile}
-        self._write_ascii(raster_dict, filename)
+        self._write_ascii(raster_dict, filename,decimals=0)
 
         self.gwaterfile['value'] = filename
         self.optgwfile['value'] = 0
@@ -524,8 +524,6 @@ class SoilProcessor:
             '0-5cm': '0',
             '5-15cm': '5',
             '15-30cm': '15',
-            '30-60cm': '30',
-            '60-100cm': '60'
         }
 
         base_url = 'https://storage.googleapis.com/solus100pub'
@@ -692,7 +690,7 @@ class SoilProcessor:
             return None
 
         raster_dict = {'data': destination, 'profile': profile}
-        self._write_ascii(raster_dict, output_path)
+        self._write_ascii(raster_dict, output_path,decimals=2)
 
         self.bedrockfile['value'] = output_path
         print(f"Bedrock depth saved to: {output_path}")
@@ -1026,11 +1024,11 @@ class SoilProcessor:
 
         if ks_only:
             soi_raster = {'data': soil_prop[0], 'profile': profile}
-            self._write_ascii(soi_raster, output_files[0])
+            self._write_ascii(soi_raster, output_files[0],decimals=2)
         else:
             for soil_property, name in zip(soil_prop, output_files):
                 soi_raster = {'data': soil_property, 'profile': profile}
-                self._write_ascii(soi_raster, name)
+                self._write_ascii(soi_raster, name,decimals=2)
 
     def process_solus_soil(self, grid_input, output=None, ks_only=False):
         """
@@ -1118,11 +1116,11 @@ class SoilProcessor:
 
         if ks_only:
             soi_raster = {'data': soil_prop[0], 'profile': profile}
-            self._write_ascii(soi_raster, output_files[0])
+            self._write_ascii(soi_raster, output_files[0],decimals=2)
         else:
             for soil_property, name in zip(soil_prop, output_files):
                 soi_raster = {'data': soil_property, 'profile': profile}
-                self._write_ascii(soi_raster, name)
+                self._write_ascii(soi_raster, name,decimals=2)
 
     def process_polaris_parameters(self, grid_input, output_files, ks_only=False):
         """
@@ -1233,11 +1231,11 @@ class SoilProcessor:
 
         if ks_only:
             soi_raster = {'data': ks, 'profile': profile}
-            self._write_ascii(soi_raster, output_files[0])
+            self._write_ascii(soi_raster, output_files[0],decimals=2)
         else:
             for soil_property, name in zip(soil_prop, output_files):
                 soi_raster = {'data': soil_property, 'profile': profile}
-                self._write_ascii(soi_raster, name)
+                self._write_ascii(soi_raster, name,decimals=2)
 
     def get_polaris_grids(self, bbox, depths, variables, stats, replace=False):
         """
@@ -1428,7 +1426,7 @@ class SoilProcessor:
 
         return output_files
     
-    def compute_ks_decay(self, grid_input, output=None):
+    def compute_ks_decay(self, grid_input, output=None, min_f=1e-4):
         """
         Produces a raster for the conductivity decay parameter `f`, following Ivanov et al., 2004.
 
@@ -1449,6 +1447,10 @@ class SoilProcessor:
             file must be written in JSON format.
         output : str
             Location to save the raster with the conductivity decay parameter `f`.
+        min_f : float, optional
+            Minimum floor value for `f` (mm⁻¹). Applied after curve fitting to prevent near-zero
+            decay values that tRIBS cannot handle. Default is 1e-4. Pixels where Ks is uniform
+            with depth produce very low fitted `f`; this floor ensures a minimum decay rate.
 
         Returns
         -------
@@ -1572,17 +1574,19 @@ class SoilProcessor:
                     try:
                         # We only optimize for 'f', so p0 (initial guess) is length 1
                         param, param_cov = curve_fit(decay_fixed_intercept, depth_vec, y, p0=[0.005], bounds=([minf], [maxf]))
-                        # Write Curve fitting results to grid
-                        f_grid[i, j] = param[0]
+                        # Apply minimum floor — tRIBS uses f in the exponent of the Ivanov
+                        # infiltration equation; near-zero f means nearly uniform Ks with depth
+                        # which can cause numerical issues in the model.
+                        f_grid[i, j] = max(param[0], min_f)
                         fcov[i, j] = param_cov[0, 0]
-                        
+
                     except RuntimeError:
-                        # If fit fails, default to a small decay or nodata
-                        f_grid[i, j] = 0.0001 
+                        # If fit fails (e.g. uniform Ks profile), use the floor value
+                        f_grid[i, j] = min_f
                         fcov[i, j] = -9999
 
         f_raster = {'data': f_grid, 'profile': profile}
-        self._write_ascii(f_raster, output_file)
+        self._write_ascii(f_raster, output_file,decimals=5)
 
     def _polygon_centroid_to_geographic(self, polygon, utm_crs=None, geographic_crs="EPSG:4326"):
         lat,lon, gmt = Aux.polygon_centroid_to_geographic(self,polygon,utm_crs=utm_crs,geographic_crs=geographic_crs)
@@ -1743,16 +1747,21 @@ class SoilProcessor:
                     self.process_solus_soil(grids, output=out, ks_only=True)
 
         # Compute Decay 'f'
-        # Tested fitting ks to different depth and found that using only using the 1st 3 depths 
-        # resulted in a much better fit for the regression. better captures surface decay which 
-        # is what this parameter should be representing.
-        ks_depths = [0.0001, 50, 150] 
+        # Map depth interval strings to representative depth in mm (top of layer).
+        # Surface uses a small non-zero value to avoid log(0) in the regression.
+        depth_to_mm = {
+            '0-5cm':    0.0001,
+            '5-15cm':   50,
+            '15-30cm':  150,
+            '30-60cm':  300,
+            '60-100cm': 600
+        }
+
         grid_depth = []
-        
-        # Mapping string depths to numeric depths for the decay function
-        # Note: Ensure these indices match depths_all: 0-5(0), 5-15(1), 15-30(2), 30-60(3)
-        for cnt in range(0, 3):
-            grid_depth.append({'depth': ks_depths[cnt], 'path': f'{folder}/Ks_{depths_all[cnt]}.asc'})
+        for depth in depths_all:
+            ks_path = f'{folder}/Ks_{depth}.asc'
+            if os.path.exists(ks_path) and depth in depth_to_mm:
+                grid_depth.append({'depth': depth_to_mm[depth], 'path': ks_path})
 
         ks_decay_param = 'f'
         self.compute_ks_decay(grid_depth, output=f'{folder}/{ks_decay_param}.asc')
@@ -1766,17 +1775,42 @@ class SoilProcessor:
                      {'type': 'clay', 'path': f'{folder}/clay_0-5cm_mean_filled.tif'}]
 
         classes = self.create_soil_map(grids, output=f'{folder}/soil_classes.soi')
+        # For ROSETTA-based sources, populate PsiB and m in the soil table directly using
+        # Rawls & Brakensiek (1982) BC parameters by texture class. These values are constant
+        # per class so a gridded raster would add no spatial information beyond the classification.
+        # POLARIS is excluded as it already provides BC-calibrated lambda and hb as grids.
+        if source in ('ISRIC', 'SOLUS'):
+            rawls_brakensiek = {
+                'sand':            (-72.6,  0.694),
+                'loamy_sand':      (-86.9,  0.553),
+                'sandy_loam':      (-146.6, 0.378),
+                'loam':            (-111.5, 0.252),
+                'silt_loam':       (-207.6, 0.234),
+                'silt':            (-166.8, 0.177),
+                'sandy_clay_loam': (-280.8, 0.319),
+                'clay_loam':       (-258.9, 0.242),
+                'silty_clay_loam': (-325.6, 0.177),
+                'sandy_clay':      (-291.7, 0.223),
+                'silty_clay':      (-341.9, 0.150),
+                'clay':            (-373.0, 0.165),
+            }
+            for cls in classes:
+                texture = cls['Texture']
+                if texture in rawls_brakensiek:
+                    cls['PsiB'], cls['m'] = rawls_brakensiek[texture]
+
         self.write_soil_table(classes, 'soils.sdt', textures=True)
 
         # Write soil gridded data file
+        # For ISRIC/SOLUS, PsiB and m come from the soil table (Rawls & Brakensiek) so
+        # PB and PI are omitted from scgrid.gdf. For POLARIS they remain gridded.
         relative_path = f'{output_dir}/{folder}/'
-        scgrid_vars = ['KS', 'TR', 'TS', 'PB', 'PI', 'FD',
-                       'PO']  # theta_S (TS) and porosity (PO) are assumed to be the same
-        
-        # Reset tribsvars list for config writing
-        tribsvars = ['Ks', 'theta_r', 'theta_s', 'psib', 'm']
-        tribsvars.append(ks_decay_param)
-        tribsvars.append('theta_s')
+        if source in ('ISRIC', 'SOLUS'):
+            scgrid_vars = ['KS', 'TR', 'TS', 'FD', 'PO']
+            tribsvars = ['Ks', 'theta_r', 'theta_s', ks_decay_param, 'theta_s']
+        else:
+            scgrid_vars = ['KS', 'TR', 'TS', 'PB', 'PI', 'FD', 'PO']
+            tribsvars = ['Ks', 'theta_r', 'theta_s', 'psib', 'm', ks_decay_param, 'theta_s']
         ref_depth = '0-5cm'
 
         num_param = len(scgrid_vars)
