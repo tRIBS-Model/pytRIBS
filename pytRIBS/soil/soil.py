@@ -114,6 +114,63 @@ class SoilProcessor:
             f.write("NODATA_value\t-9999\n")
             f.write(f"{value}\n")
 
+    def generate_initial_groundwater(self, bedrock_path, fraction, filename=None):
+        """
+        Generates a spatially variable initial groundwater depth raster by scaling a bedrock
+        depth raster by a user-specified fraction.
+
+        The water table depth at each cell is computed as::
+
+            water_table_depth_mm = bedrock_depth_m * fraction * 1000
+
+        For example, a fraction of 0.70 places the initial water table 70% of the way from
+        the surface to bedrock.
+
+        Parameters
+        ----------
+        bedrock_path : str
+            Path to the bedrock depth raster (ASCII or GeoTIFF) in metres, e.g. as produced
+            by ``get_solus_bedrock``.
+        fraction : float
+            Fraction of the bedrock depth at which to initialise the water table (0–1).
+        filename : str, optional
+            Output file path for the groundwater raster. If not provided, the value stored in
+            ``self.gwaterfile['value']`` is used.
+
+        Returns
+        -------
+        str
+            Path to the written groundwater ASCII raster.
+
+        Raises
+        ------
+        ValueError
+            If no filename can be determined.
+        """
+        if filename is None:
+            gwfile = self.gwaterfile['value']
+            if gwfile is None:
+                print("A filename must be provided if gwaterfile has not been set.")
+                return
+            filename = gwfile
+
+        bedrock = self._read_ascii(bedrock_path)
+        data = bedrock['data'].astype(np.float32)
+        profile = bedrock['profile']
+        nodata = profile.get('nodata', -9999)
+
+        # Scale by fraction and convert m to mm, preserving nodata cells
+        water_table = np.where(data == nodata, nodata, data * fraction * 1000.0)
+
+        raster_dict = {'data': water_table, 'profile': profile}
+        self._write_ascii(raster_dict, filename)
+
+        self.gwaterfile['value'] = filename
+        self.optgwfile['value'] = 0
+
+        print(f"Initial groundwater depth raster written to: {filename}")
+        return filename
+
     def read_soil_table(self, textures=False, file_path=None):
         """
         Reads a Soil Reclassification Table Structure (*.sdt) file.
