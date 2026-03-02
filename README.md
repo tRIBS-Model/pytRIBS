@@ -15,6 +15,23 @@ A full tRIBS model setup, simulation, and analysis is provided [here.](https://z
 PytRIBS uses semantic versioning. Currently, we are in the initial development phase--anything MAY change at any time and
 this package SHOULD NOT be considered stable.
 
+### Version 0.7.2 (In Progress)
+This release introduces a set of relatively small changes that fix existing points of confusion or bugs in the code. Additionally, updates to the meteorological workflow to handle changes to the NASA API for downloading NLDAS-2 data.
+
+### Added
+* Added new optional input to the run_soil_workflow for downloading SOLUS gridded soil data rather than the ISRIC or POLARIS datasets already in pytRIBS. 
+* Added a new function to the soil class, get_solus_bedrock, that will download the SOLUS bedrock depth dataset and process the data into a format readable by tRIBS.
+* Added a new function to the soil class, generate_initial_groundwater, that allows users to generate an initial groundwater depth raster from a gridded bedrock depth raster based on a fraction of the depth to bedrock that is saturated.
+
+### Changed / Improved
+* **Soil Workflow**
+    * Updated all ascii raster writing calls in the soil workflow to limit the number of decimal places written to the ascii rasters.
+* **Watershed Delineation**
+    * Updated the method for filling sinks during watershed delineation to use a more stable method in WhiteBoxTools. The previous method caused crashes on certain Linux machines.
+* **Hydraulic Conductivity Decay**
+    * Updated the calculation of hydraulic conducutivity decay to be based on the soil dataset used rather than standard across all datasets.
+    * Updated the compute_ks_decay function to inlcude an optional input, `min_f`, this defaults to 0.0001 [1/mm]. This is the minimum value for the calculated decay rate, f so that extreme values aren't provided to the tRIBS model that result in instabilities.
+
 ## Version 0.7.1 (02/03/2026)
 This release is a small update to add a missing dependency required for downloading and processing the NLDAS-2 elevation raster.
 
