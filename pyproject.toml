@@ -15,7 +15,7 @@ license = {text = "GPL-version 2"}
 keywords = ["hydrology","modeling"]
 dependencies = [
     "docker~=7.1.0",
-    "earthaccess~=0.15.1",
+    "earthaccess>=0.14.0",
     "geopandas~=0.14.4",
     "matplotlib-scalebar~=0.9.0",
     "matplotlib>=3.9.0",
@@ -37,7 +37,7 @@ dependencies = [
     "xarray~=2025.4.0",
     "h5py~=3.15.1",
 ]
-version = "0.7.1"
+version = "0.7.2"
 
 [project.urls]
 Repository = "https://github.com/tribshms/pytRIBS"
