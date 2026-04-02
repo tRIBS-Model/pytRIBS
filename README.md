@@ -15,16 +15,25 @@ A full tRIBS model setup, simulation, and analysis is provided [here.](https://z
 PytRIBS uses semantic versioning. Currently, we are in the initial development phase--anything MAY change at any time and
 this package SHOULD NOT be considered stable.
 
-## Version 0.7.1 (02/03/2026)
+## Version 0.7.2 (04/02/2026)
+This release fixes an issue users on certain versions of Python and introduces GitHub Actions.
+
+#### Added
+* Added GitHub Actions workflow to verify installation across Python 3.10, 3.11, and 3.12 on ubuntu-latest.
+
+#### Changed
+* Relaxed `earthaccess` requirement from `~=0.15.1` to `>=0.14.0` to resolve a dependency conflict for users on Python 3.10.
+
+### Version 0.7.1 (02/03/2026)
 This release is a small update to add a missing dependency required for downloading and processing the NLDAS-2 elevation raster.
 
 ### Version 0.7.0 (02/03/2026)
 This release introduces a set of relatively small changes that fix existing points of confusion or bugs in the code. Additionally, updates to the meteorological workflow to handle changes to the NASA API for downloading NLDAS-2 data.
 
-### Added
+#### Added
 * Added new optional input to the run_soil_workflow for downloading POLARIS gridded soil data rather than the ISRIC dataset. Can be controlled with the `source` argument but defaults to ISRIC if not specified. This dataset follows the same general workflow but does not require applying ROSETTA3 like with the ISRIC data. ([#26](https://github.com/tRIBS-Model/pytRIBS/pull/26))
 
-### Changed / Improved
+#### Changed / Improved
 * **Spatial Outputs** ([#28](https://github.com/tRIBS-Model/pytRIBS/pull/28))
     * Addressed limitation of pytRIBS workflow only able to process tRIBS spatial outputs if the model was ran in parallel mode.
     * Renamed merge_parallel_spatial_files to get_spatial_files to reflect its expanded capability.
