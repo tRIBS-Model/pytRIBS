@@ -1,5 +1,4 @@
 numpy~=1.26.4
-pyvista~=0.43.5
 pandas~=2.2.1
 matplotlib~=3.8.4
 geopandas~=0.14.3

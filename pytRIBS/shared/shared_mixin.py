@@ -7,7 +7,6 @@ import numpy as np
 
 import geopandas as gpd
 import pandas as pd
-import pyvista as pv
 import math
 from shapely.geometry import LineString
 from shapely.geometry import Point
@@ -562,75 +561,6 @@ class Shared:
         except FileNotFoundError:
             return
 
-    @staticmethod
-    def plot_mesh(mesh, scalar=None, **kwargs):
-        """
-        Plots a 3D mesh using PyVista with optional scalar data.
-
-        This method visualizes a mesh object, optionally using scalar data to color the mesh. It handles meshes
-        from a file path or PyVista object and allows for customizing the plot with additional keyword arguments.
-
-        Parameters
-        ----------
-        mesh : str or pv.PolyData
-            If a string is provided, it should be a path to a mesh file that will be read using PyVista. If a PyVista
-            `PolyData` object is provided, it will be used directly for plotting.
-
-        scalar : array-like, optional
-            Scalar data to be used for coloring the mesh. If not provided, it defaults to the 'Elevation' array of the
-            mesh. The scalar data must match the number of points or cells in the mesh.
-
-        **kwargs : keyword arguments
-            Additional keyword arguments passed to `pyvista.Plotter.add_mesh` for further customization of the plot.
-
-        Returns
-        -------
-        pv.Plotter
-            A PyVista `Plotter` object configured to display the mesh.
-
-        Notes
-        -----
-        - If `scalar` is provided, it will be used to color the mesh. Closed points or cells (where 'BoundaryCode' is 1)
-          are set to NaN.
-        - If the length of `scalar` matches the number of points, NaNs are assigned to closed points.
-        - If the length of `scalar` matches the number of cells, NaNs are assigned to closed cells.
-        - The plot camera is set to view from the top-down (xy plane) with north up.
-
-        Example
-        -------
-        >>> mesh = pv.read('path_to_mesh_file.vtk')
-        >>> plotter = plot_mesh(mesh, scalar=my_scalar_data, cmap='viridis')
-        >>> plotter.show()
-
-        Raises
-        ------
-        ValueError
-            If the length of `scalar` does not match either the number of points or cells in the mesh.
-        """
-        if isinstance(mesh, str):
-            # check if path exists
-            mesh = pv.read(mesh)
-
-        if scalar is None:
-            scalar = mesh.get_array('Elevation')
-
-        # set closed points or cells to nan
-        if len(scalar) == mesh.n_points:
-            scalar[mesh['BoundaryCode'] == 1] = np.nan
-            mesh.point_data['scale'] = scalar
-        elif len(scalar) == mesh.n_cells:
-            extracted = mesh.extract_points(mesh['BoundaryCode'] == 1, adjacent_cells=True)
-            scalar[extracted.cell_data['vtkOriginalCellIds']] = np.nan
-            mesh.point_data['scale'] = scalar
-        else:
-            print("Scalar dimensions must match either the number of points or cells in the mesh.")
-
-        plotter = pv.Plotter()
-        plotter.add_mesh(mesh, scalars='scale', **kwargs)
-        plotter.camera_position = 'xy'  # Set camera to view from top-down (xz plane)
-        plotter.view_vector = [0, 0, 1]  # Set view direction vector to [0, 0, 1] (north is up)
-
-        return plotter
 
     def get_invariant_properties(self):
         """
