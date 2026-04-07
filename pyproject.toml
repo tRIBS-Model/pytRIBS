@@ -14,29 +14,30 @@ readme = "README.md"
 license = {text = "GPL-version 2"}
 keywords = ["hydrology","modeling"]
 dependencies = [
-    "docker~=7.1.0",
+    "docker>=7.1.0",
     "earthaccess>=0.14.0",
-    "geopandas~=0.14.4",
-    "matplotlib-scalebar~=0.9.0",
+    "geopandas>=1.0.0",
+    "matplotlib-scalebar>=0.9.0",
     "matplotlib>=3.9.0",
-    "numpy~=1.26.4",
-    "OWSLib~=0.31.0",
-    "pandas~=2.2.3",
-    "pynldas2~=0.17.1",
-    "pyproj~=3.7.1",
-    "PyWavelets~=1.8.0",
-    "rasterio==1.3.10",
-    "requests~=2.32.3",
-    "rosetta-soil~=0.1.2",
-    "scikit-learn~=1.7.0",
-    "scipy~=1.13.1",
-    "shapely~=2.0.7",
-    "timezonefinder~=6.5.9",
-    "whitebox~=2.3.6",
-    "xarray~=2025.4.0",
-    "h5py~=3.15.1",
+    "numpy>=2.1.0",
+    "OWSLib>=0.31.0",
+    "pandas>=2.2.3",
+    "pynldas2>=0.17.1",
+    "pyproj>=3.7.1",
+    "PyWavelets>=1.8.0",
+    "rasterio>=1.4.0",
+    "requests>=2.32.3",
+    "rosetta-soil>=0.1.2",
+    "scikit-learn>=1.7.0",
+    "scipy>=1.14.0",
+    "shapely>=2.0.7",
+    "timezonefinder>=6.5.9",
+    "whitebox>=2.3.6",
+    "xarray>=2025.4.0",
+    "h5py>=3.15.1",
 ]
-version = "0.7.2"
+version = "0.7.3"
+requires-python = ">=3.10"
 
 [project.urls]
-Repository = "https://github.com/tribshms/pytRIBS"
+Repository = "https://github.com/tRIBS-Model/pytRIBS"
