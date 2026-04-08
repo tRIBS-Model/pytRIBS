@@ -15,7 +15,6 @@ from datetime import datetime
 import rasterio
 from rasterio.transform import from_bounds
 from rasterio.warp import calculate_default_transform, reproject, Resampling
-import pytz
 import requests
 from rasterio.merge import merge
 
@@ -726,7 +725,7 @@ class SoilProcessor:
             for j in range(0, size[1]):
                 # Organize array for input into packag
                 data = [sg250_data[x, i, j] for x in np.arange(0, 6)]
-                soil_data = SoilData.from_array([data])
+                soil_data = SoilData.from_iter([data])
                 mean, stdev, codes = rosetta(3, soil_data)  # apply Rosetta version 3
                 theta_r[:, i, j] = [mean[0, 0], stdev[0, 0], codes[0]]
                 theta_s[:, i, j] = [mean[0, 1], stdev[0, 1], codes[0]]

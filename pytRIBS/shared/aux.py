@@ -4,7 +4,7 @@ import shutil
 from datetime import datetime
 
 import pandas as pd
-import pytz
+from zoneinfo import ZoneInfo
 import rasterio
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from rasterio import fill
@@ -115,8 +115,7 @@ class Aux:
         tf = TimezoneFinder()
         timezone_str = tf.timezone_at(lng=lon, lat=lat)
 
-        timezone = pytz.timezone(timezone_str)
-        local_time = datetime.now(timezone)
+        local_time = datetime.now(ZoneInfo(timezone_str))
 
         gmt_offset = int(local_time.utcoffset().total_seconds() / 3600)
 
