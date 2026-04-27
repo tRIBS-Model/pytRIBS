@@ -475,7 +475,7 @@ class InOut:
 
         Land Use Reclassification Table Structure (*.ldt, see tRIBS documentation for more details)
         #Types	#Params
-        ID	a	b1	 P	S	K	b2	Al	 h	Kt	Rs	V LAI theta*_s theta*_t
+        ID	 P	S	K	b2	Al	 h	Kt	Rs	V LAI theta*_s theta*_t
 
         """
         if file_path is None:
@@ -492,21 +492,19 @@ class InOut:
 
         metadata = lines.pop(0)
         num_types, num_params = map(int, metadata.strip().split())
-        param_standard = 15
+        param_standard = 13
 
         if num_params != param_standard:
-            print(f"The number parameters in {file_path} do not conform with standard landuse .sdt format.")
+            print(f"The number parameters in {file_path} do not conform with standard landuse .ldt format.")
             return
 
         for l in lines:
             land_info = l.strip().split()
 
             if len(land_info) == param_standard:
-                _id, a, b_1, p, s, k, b_2, al, h, kt, rs, v, lai, tstar_s, tstar_t = land_info
+                _id, p, s, k, b_2, al, h, kt, rs, v, lai, tstar_s, tstar_t = land_info
                 station = {
                     "ID": _id,
-                    "a": a,
-                    "b1": b_1,
                     "P": p,
                     "S": s,
                     "K": k,
@@ -527,27 +525,30 @@ class InOut:
 
         return landuse_list
     @staticmethod
-    def write_landuse_table(landuse_list,file_path):
+    def write_landuse_table(landuse_list, file_path):
         """
         Writes out Land Use Reclassification Table(*.ldt) file with the following format:
         #Types	#Params
-        ID	a	b1	 P	S	K	b2	Al	 h	Kt	Rs	V LAI theta*_s theta*_t
+        ID	 P	S	K	b2	Al	 h	Kt	Rs	V LAI theta*_s theta*_t
+
+        Note: the Gray (1970) interception parameters (a, b1) present in pre-v6.0.0
+        land use tables have been removed. Tables written by this function are not
+        compatible with tRIBS versions prior to v6.0.0.
 
         :param landuse_list: List of dictionaries containing land information specified by .ldt structure above.
-        :param file_path: Path to save *.sdt file.
+        :param file_path: Path to save *.ldt file.
         """
-        param_standard = 15
+        param_standard = 13
 
         with open(file_path, 'w') as file:
-            # Write metadata line
             metadata = f"{len(landuse_list)} {param_standard}\n"
             file.write(metadata)
 
-            # Write station information
             for type in landuse_list:
-                line = f"{str(type['ID'])} {str(type['a'])} {str(type['b1'])} {str(type['P'])} {str(type['S'])} {str(type['K'])} " \
-                       f" {str(type['b2'])} {str(type['Al'])} {str(type['h'])} {str(type['Kt'])} {str(type['Rs'])} {str(type['V'])}" \
-                       f" {str(type['LAI'])} {str(type['theta*_s'])} {str(type['theta*_t'])}\n"
+                line = (f"{str(type['ID'])} {str(type['P'])} {str(type['S'])} {str(type['K'])} "
+                        f"{str(type['b2'])} {str(type['Al'])} {str(type['h'])} {str(type['Kt'])} "
+                        f"{str(type['Rs'])} {str(type['V'])} {str(type['LAI'])} "
+                        f"{str(type['theta*_s'])} {str(type['theta*_t'])}\n")
                 file.write(line)
 
     def read_grid_data_file(self, grid_type):

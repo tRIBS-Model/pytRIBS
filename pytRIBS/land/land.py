@@ -121,8 +121,6 @@ class LandProcessor(InOut):
         for cl in classes:
             class_list.append({
                 'ID': cl,
-                'a': None,
-                'b1': None,
                 'P': None,
                 'S': None,
                 'K': None,
@@ -227,8 +225,6 @@ class LandProcessor(InOut):
         for cl in classes:
             class_list.append({
                 'ID': cl,
-                'a': None,
-                'b1': None,
                 'P': None,
                 'S': None,
                 'K': None,
