@@ -71,84 +71,118 @@ class InOut:
                 z, bc = row['elevation'], int(row['bc'])
                 file.write(f"{x} {y} {z} {bc}\n")
 
-    def write_input_file(self, output_file_path, detailed=False):
+    def write_input_file(self, output_file_path):
         """
-        Writes .in file for tRIBS model simulation.
-        :param self:
-        :param output_file_path: Location to write input file to.
-        :param detailed: Option to print input file with option descriptions and related info.
+        Writes .in file for tRIBS model simulation, organized into sections
+        matching the tRIBS input file template format.
+        :param output_file_path: Path to write input file to.
         """
-        if detailed:
-            tags = ['time', 'mesh', 'flow', 'hydro', 'spatial', 'meterological', 'output', 'forecast', 'stochastic',
-                    'restart', 'parallel']
-            headers = {'time': 'Time Variables', 'mesh': 'Mesh Options', 'flow': 'Routing Variables',
-                       'hydro': 'Hydrologic Processes',
-                       'spatial': 'Spatial Data Inputs', 'meterological': 'Meterological Options and Data',
-                       'output': 'Model Output Paths and Options',
-                       'forecast': 'Forecast Mode', 'stochastic': 'Stochastic Mode', 'restart': 'Restart Mode',
-                       'parallel': 'Parallel Mode'}
+        SECTION_TITLES = {
+            1: "Section 1: Model Run Parameters",
+            2: "Section 2: Model Run Options",
+            3: "Section 3: Model Input Files and Pathnames",
+            4: "Section 4: Model Modes",
+            5: "Section 5: Restart Mode Options",
+            6: "Section 6: Parallel Mode Options",
+        }
 
-            meta = "This is a template input file for tRIBS 5.2.0. The file is divided in sections mirroring documentation\n" + \
-                   "found at: https://tribshms.readthedocs.io/en/latest/man/Model%20Input%20File.html#input-file-options\n" + \
-                   "Some values are already provided in the line following the keyword, where keywords are shown in all caps.\n" + \
-                   "Where values are not provided are marked by the string \"Update!\". Following the value is a short description of \n" + \
-                   "what the keyword does, alongside available options. Note: only values required by given a option must be specified.\n\n"
+        HEADER = (
+            "##############################################################################\n"
+            "##\n"
+            "##                    tRIBS Distributed Hydrologic Model\n"
+            "##\n"
+            "##              TIN-based Real-time Integrated Basin Simulator\n"
+            "##                       Ralph M. Parsons Laboratory\n"
+            "##                  Massachusetts Institute of Technology\n"
+            "##\n"
+            "##############################################################################\n"
+        )
 
-            current_datetime = datetime.now()
-            current_user = getpass.getuser()
+        def _options_block(entries):
+            """Build ## comment lines for keywords that have enumerated options."""
+            has_options = [e for e in entries
+                           if len([l for l in (e.get('describe') or '').split('\n') if l.strip()]) > 1]
+            if not has_options:
+                return []
+            col = max(len(f"##  {e['keyword']}") for e in has_options) + 3
+            lines = []
+            for entry in has_options:
+                describe = entry.get('describe') or ''
+                opt_lines = [l for l in describe.split('\n') if l.strip()][1:]
+                prefix = f"##  {entry['keyword']}".ljust(col)
+                indent = "##" + " " * (col - 2)
+                lines.append(f"{prefix}{opt_lines[0]}\n")
+                for opt in opt_lines[1:]:
+                    lines.append(f"{indent}{opt}\n")
+                lines.append("##\n")
+            return lines
 
-            formatted_datetime = current_datetime.strftime("%Y-%m-%d %H:%M:%S")
+        def _section_header(title, option_lines=None):
+            parts = [
+                "\n##=========================================================================\n",
+                "##\n##\n",
+                f"##\t\t\t{title}\n",
+                "##\n##\n",
+            ]
+            if option_lines:
+                parts.extend(option_lines)
+            parts.append("##=========================================================================\n\n")
+            return ''.join(parts)
 
-            with open( output_file_path, 'w') as file:
+        def _write_entry(f, entry):
+            keyword = entry['keyword']
+            describe = entry.get('describe') or ''
+            inline = describe.split('\n')[0] if describe else ''
+            value = entry.get('value')
+            if value is None:
+                value = ''
+            f.write(f"{keyword:<26}{inline}\n")
+            f.write(f"{value}\n\n")
 
-                file.write(f"Created by: {current_user}\n")
-                file.write(f"On: {formatted_datetime}\n\n")
+        # Group entries by section/subsection, preserving insertion order
+        section_data = {}
+        extras = []
+        for entry in self.options.values():
+            sec = entry.get('section')
+            if sec is None:
+                extras.append(entry)
+            else:
+                subsec = entry.get('subsection') or ''
+                if sec not in section_data:
+                    section_data[sec] = {}
+                if subsec not in section_data[sec]:
+                    section_data[sec][subsec] = []
+                section_data[sec][subsec].append(entry)
 
-                string = 'Input File Template for tRIBS Version 5.3.0'
-                underline = '=' * len(string)
-                file.write(f'{underline}\n{string}\n{underline}\n\n')
-                file.write(meta)
+        with open(output_file_path, 'w') as f:
+            f.write(HEADER)
 
-                for tag in tags:
-                    underline = '=' * len(f'Section: {headers[tag]}')
-                    file.write(f'{underline}\nSection: {headers[tag]}\n{underline}\n\n')
-                    result = [item for item in self.options.values() if
-                              any(tag in _tag for _tag in item.get("tags", []))]
+            for sec_num in sorted(section_data):
+                title = SECTION_TITLES.get(sec_num, f"Section {sec_num}")
+                all_entries = [e for sub in section_data[sec_num].values() for e in sub]
+                opt_lines = _options_block(all_entries)
+                f.write(_section_header(title, opt_lines if opt_lines else None))
 
-                    for dictionary in result:
-                        keyword = dictionary['keyword']
-                        file.write(f'{keyword}\n')
-                        val = dictionary['value']
-                        if val is not None:
-                            file.write(f"{dictionary['value']}\n\n")
-                        else:
-                            file.write(f"Update!\n\n")
+                for subsec, entries in section_data[sec_num].items():
+                    if subsec:
+                        f.write(f"## {subsec}\n## {'-' * len(subsec)}\n\n")
+                    for entry in entries:
+                        _write_entry(f, entry)
+                    if subsec:
+                        f.write('\n')
 
-                        description = dictionary['describe']
-                        if description is not None:
-                            file.write(f"Description:\n{description}\n")
-                        else:
-                            file.write(f"None\n")
-                        file.write(f" \n")
-        else:
-            with open(output_file_path, 'w') as output_file:
+            if extras:
+                f.write(_section_header("Additional Options"))
+                for entry in extras:
+                    _write_entry(f, entry)
 
-                current_datetime = datetime.now()
-                current_user = getpass.getuser()
-
-                formatted_datetime = current_datetime.strftime("%Y-%m-%d %H:%M:%S")
-
-                output_file.write(f"Created by: {current_user}\n")
-                output_file.write(f"On: {formatted_datetime}\n\n")
-
-                for key, subdict in self.options.items():
-                    if "keyword" in subdict and "value" in subdict:
-                        keyword = subdict["keyword"]
-                        value = subdict["value"]
-                        if value is None:
-                            value = ""
-                        output_file.write(f"{keyword}\n")
-                        output_file.write(f"{value}\n\n")
+            f.write(
+                "\n##=========================================================================\n"
+                "##\n##\n"
+                "##\t\t\t\tEnd\n"
+                "##\n##\n"
+                "##=========================================================================\n"
+            )
 
 
 
