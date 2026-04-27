@@ -402,18 +402,12 @@ class Met(MetProcessor):
         The path or name of the file containing hydrometeorological station data.
     gaugestations : str
         The path or name of the file containing gauge station data.
-    hydrometbasename : str
-        The base name for hydrometeorological data files.
     rainfile : str
         The path or name of the file containing rainfall data.
     hydrometgrid : str
         The path or name of the file containing the hydrometeorological grid data.
-    metdataoption : int
-        Option flag for meteorological data processing.
     rainsource : str
         The source of the rainfall data.
-    gaugebasename : str
-        The base name for gauge data files.
     rainextension : str
         The file extension for the rainfall data files.
     """
@@ -432,10 +426,7 @@ class Met(MetProcessor):
 
         self.hydrometstations = options['hydrometstations']
         self.gaugestations = options['gaugestations']
-        self.hydrometbasename = options['hydrometbasename']
         self.rainfile = options['rainfile']
         self.hydrometgrid = options['hydrometgrid']
-        self.metdataoption = options['metdataoption']
         self.rainsource = options['rainsource']
-        self.gaugebasename = options['gaugebasename']
         self.rainextension = options['rainextension']
