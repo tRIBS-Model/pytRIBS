@@ -184,7 +184,72 @@ class InOut:
                 "##=========================================================================\n"
             )
 
+    def write_snow_params(self, output_file_path='data/model/snow_params.spf'):
+        """
+        Writes a tRIBS snow parameter file (*.spf) with default values and automatically
+        sets the SNOWFILENAME input option to the written file path. This method is only
+        needed when the snow module is enabled (OPTSNOW: 1).
 
+        This method is available on the Model class. After calling it, the SNOWFILENAME
+        keyword in the model input file will be populated automatically when
+        write_input_file() is called.
+
+        Example
+        -------
+        >>> from pytRIBS.classes import Model
+        >>> m = Model()
+        >>> m.write_snow_params('data/model/snow_params.spf')
+
+        The written file follows the tRIBS snow parameter file format (*.spf):
+
+        ## Section Name
+        ## ------------
+        KEYWORD:                  Description
+        value
+
+        All values are set to physically reasonable defaults. Review and adjust
+        parameter values for your specific watershed before running the model.
+        See tRIBS documentation for parameter descriptions.
+
+        :param output_file_path: Path to write the snow parameter file to. Defaults to 'data/model/snow_params.spf',
+            matching the standard project directory structure created by the Project class. If you are not using
+            the default project structure, provide the full path explicitly.
+        """
+        sections = {
+            "General Snow Parameters": [
+                ("IRREDUCIBLE_SAT:",         "Irreducible water saturation (Volumetric fraction of Pore Space)", 0.01),
+                ("K_SAT_REF:",               "Saturated hydraulic conductivity of snowpack (m/s)",               0.0001),
+                ("MIN_SNOW_TEMP:",           "Minimum temperature of snow (Celsius)",                            -27),
+                ("FRESH_SNOW_DENSITY:",      "Fresh snow density baseline (kg/m^3)",                             60),
+                ("CANOPY_WIND_ATTENUATION:", "Coefficient of exponential wind attenuation by canopy (Dimensionless)", 0.4),
+                ("ROUGHNESS_LENGTH:",        "Aerodynamic roughness length (z0) of the snow surface (m)",        0.04),
+            ],
+            "Albedo Parameters": [
+                ("ALBEDO_FRESH:",            "Fresh snow albedo",                                                0.85),
+                ("ALBEDO_DECAY_DRY:",        "Exponential decay rate of albedo for dry snow",                   0.96),
+                ("ALBEDO_DECAY_WET:",        "Exponential decay rate of albedo for wet snow",                   0.82),
+                ("ALBEDO_MIN:",              "Minimum snow albedo which snow cannot decay below",               0.2),
+                ("ALBEDO_RESET_THRESHOLD:",  "Minimum snowfall depth required to reset the age of snow surface (mm)", 0.5),
+            ],
+            "Precipitation Phase Partitioning Parameters": [
+                ("OPTPRECPARTITION:",        "Option for precipitation partitioning scheme\n"
+                                             "0  Wet-bulb temperature threshold\n"
+                                             "1  Linear transition between min/max temperature", 0),
+                ("MAX_WETBULB_TEMP:",        "Upper wet-bulb temperature at which snowfall can occur for OPTPRECPARTITION 0 (Celsius)", 5),
+                ("MIN_TEMP_RAIN:",           "Minimum air temperature at which liquid precipitation can occur for OPTPRECPARTITION 1 (Celsius)", 0),
+                ("MAX_TEMP_SNOW:",           "Maximum air temperature at which snowfall can occur for OPTPRECPARTITION 1 (Celsius)", 4),
+            ],
+        }
+
+        with open(output_file_path, 'w') as f:
+            for section, entries in sections.items():
+                f.write(f"## {section}\n## {'-' * len(section)}\n\n")
+                for keyword, describe, value in entries:
+                    inline = describe.split('\n')[0]
+                    f.write(f"{keyword:<26}{inline}\n")
+                    f.write(f"{value}\n\n")
+
+        self.options['snowfilename']['value'] = output_file_path
 
     def read_precip_sdf(self, file_path=None):
         """
