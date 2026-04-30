@@ -184,70 +184,72 @@ class InOut:
                 "##=========================================================================\n"
             )
 
+    @staticmethod
+    def create_snow_params():
+        """
+        Creates a dictionary of snow module parameters with default values, mirroring
+        the structure of create_input_file(). Called at Model initialization and stored
+        as self.snow_options. Parameters can be set the same way as main input keywords:
+
+        >>> model.irreducible_sat['value'] = 0.02
+
+        :return: dict of snow parameters keyed by lowercase parameter name.
+        """
+        return {
+            'irreducible_sat':         {'keyword': 'IRREDUCIBLE_SAT:',         'describe': 'Irreducible water saturation (Volumetric fraction of Pore Space)',                                  'value': 0.01,   'section': 'General Snow Parameters'},
+            'k_sat_ref':               {'keyword': 'K_SAT_REF:',               'describe': 'Saturated hydraulic conductivity of snowpack (m/s)',                                                'value': 0.0001, 'section': 'General Snow Parameters'},
+            'min_snow_temp':           {'keyword': 'MIN_SNOW_TEMP:',           'describe': 'Minimum temperature of snow (Celsius)',                                                              'value': -27,    'section': 'General Snow Parameters'},
+            'fresh_snow_density':      {'keyword': 'FRESH_SNOW_DENSITY:',      'describe': 'Fresh snow density baseline (kg/m^3)',                                                               'value': 60,     'section': 'General Snow Parameters'},
+            'canopy_wind_attenuation': {'keyword': 'CANOPY_WIND_ATTENUATION:', 'describe': 'Coefficient of exponential wind attenuation by canopy (Dimensionless)',                             'value': 0.4,    'section': 'General Snow Parameters'},
+            'roughness_length':        {'keyword': 'ROUGHNESS_LENGTH:',        'describe': 'Aerodynamic roughness length (z0) of the snow surface (m)',                                         'value': 0.04,   'section': 'General Snow Parameters'},
+            'albedo_fresh':            {'keyword': 'ALBEDO_FRESH:',            'describe': 'Fresh snow albedo',                                                                                  'value': 0.85,   'section': 'Albedo Parameters'},
+            'albedo_decay_dry':        {'keyword': 'ALBEDO_DECAY_DRY:',        'describe': 'Exponential decay rate of albedo for dry snow',                                                     'value': 0.96,   'section': 'Albedo Parameters'},
+            'albedo_decay_wet':        {'keyword': 'ALBEDO_DECAY_WET:',        'describe': 'Exponential decay rate of albedo for wet snow',                                                     'value': 0.82,   'section': 'Albedo Parameters'},
+            'albedo_min':              {'keyword': 'ALBEDO_MIN:',              'describe': 'Minimum snow albedo which snow cannot decay below',                                                  'value': 0.2,    'section': 'Albedo Parameters'},
+            'albedo_reset_threshold':  {'keyword': 'ALBEDO_RESET_THRESHOLD:',  'describe': 'Minimum snowfall depth required to reset the age of snow surface (mm)',                             'value': 0.5,    'section': 'Albedo Parameters'},
+            'optprecpartition':        {'keyword': 'OPTPRECPARTITION:',        'describe': 'Option for precipitation partitioning scheme\n0  Wet-bulb temperature threshold\n1  Linear transition between min/max temperature', 'value': 0, 'section': 'Precipitation Phase Partitioning Parameters'},
+            'max_wetbulb_temp':        {'keyword': 'MAX_WETBULB_TEMP:',        'describe': 'Upper wet-bulb temperature at which snowfall can occur for OPTPRECPARTITION 0 (Celsius)',           'value': 5,      'section': 'Precipitation Phase Partitioning Parameters'},
+            'min_temp_rain':           {'keyword': 'MIN_TEMP_RAIN:',           'describe': 'Minimum air temperature at which liquid precipitation can occur for OPTPRECPARTITION 1 (Celsius)',  'value': 0,      'section': 'Precipitation Phase Partitioning Parameters'},
+            'max_temp_snow':           {'keyword': 'MAX_TEMP_SNOW:',           'describe': 'Maximum air temperature at which snowfall can occur for OPTPRECPARTITION 1 (Celsius)',              'value': 4,      'section': 'Precipitation Phase Partitioning Parameters'},
+        }
+
     def write_snow_params(self, output_file_path='data/model/snow_params.spf'):
         """
-        Writes a tRIBS snow parameter file (*.spf) with default values and automatically
+        Writes a tRIBS snow parameter file (*.spf) from self.snow_options and automatically
         sets the SNOWFILENAME input option to the written file path. This method is only
         needed when the snow module is enabled (OPTSNOW: 1).
 
-        This method is available on the Model class. After calling it, the SNOWFILENAME
-        keyword in the model input file will be populated automatically when
-        write_input_file() is called.
+        Parameter values are set the same way as main input file keywords, via self.snow_options:
 
         Example
         -------
         >>> from pytRIBS.classes import Model
         >>> m = Model()
+
+        >>> # Adjust parameters before writing
+        >>> m.irreducible_sat['value'] = 0.02
+        >>> m.albedo_fresh['value'] = 0.90
         >>> m.write_snow_params('data/model/snow_params.spf')
 
-        The written file follows the tRIBS snow parameter file format (*.spf):
-
-        ## Section Name
-        ## ------------
-        KEYWORD:                  Description
-        value
-
-        All values are set to physically reasonable defaults. Review and adjust
-        parameter values for your specific watershed before running the model.
-        See tRIBS documentation for parameter descriptions.
-
-        :param output_file_path: Path to write the snow parameter file to. Defaults to 'data/model/snow_params.spf',
-            matching the standard project directory structure created by the Project class. If you are not using
-            the default project structure, provide the full path explicitly.
+        :param output_file_path: Path to write the snow parameter file to. Defaults to
+            'data/model/snow_params.spf', matching the standard project directory structure
+            created by the Project class. If you are not using the default project structure,
+            provide the full path explicitly.
         """
-        sections = {
-            "General Snow Parameters": [
-                ("IRREDUCIBLE_SAT:",         "Irreducible water saturation (Volumetric fraction of Pore Space)", 0.01),
-                ("K_SAT_REF:",               "Saturated hydraulic conductivity of snowpack (m/s)",               0.0001),
-                ("MIN_SNOW_TEMP:",           "Minimum temperature of snow (Celsius)",                            -27),
-                ("FRESH_SNOW_DENSITY:",      "Fresh snow density baseline (kg/m^3)",                             60),
-                ("CANOPY_WIND_ATTENUATION:", "Coefficient of exponential wind attenuation by canopy (Dimensionless)", 0.4),
-                ("ROUGHNESS_LENGTH:",        "Aerodynamic roughness length (z0) of the snow surface (m)",        0.04),
-            ],
-            "Albedo Parameters": [
-                ("ALBEDO_FRESH:",            "Fresh snow albedo",                                                0.85),
-                ("ALBEDO_DECAY_DRY:",        "Exponential decay rate of albedo for dry snow",                   0.96),
-                ("ALBEDO_DECAY_WET:",        "Exponential decay rate of albedo for wet snow",                   0.82),
-                ("ALBEDO_MIN:",              "Minimum snow albedo which snow cannot decay below",               0.2),
-                ("ALBEDO_RESET_THRESHOLD:",  "Minimum snowfall depth required to reset the age of snow surface (mm)", 0.5),
-            ],
-            "Precipitation Phase Partitioning Parameters": [
-                ("OPTPRECPARTITION:",        "Option for precipitation partitioning scheme\n"
-                                             "0  Wet-bulb temperature threshold\n"
-                                             "1  Linear transition between min/max temperature", 0),
-                ("MAX_WETBULB_TEMP:",        "Upper wet-bulb temperature at which snowfall can occur for OPTPRECPARTITION 0 (Celsius)", 5),
-                ("MIN_TEMP_RAIN:",           "Minimum air temperature at which liquid precipitation can occur for OPTPRECPARTITION 1 (Celsius)", 0),
-                ("MAX_TEMP_SNOW:",           "Maximum air temperature at which snowfall can occur for OPTPRECPARTITION 1 (Celsius)", 4),
-            ],
-        }
+        section_data = {}
+        for entry in self.snow_options.values():
+            sec = entry['section']
+            if sec not in section_data:
+                section_data[sec] = []
+            section_data[sec].append(entry)
 
         with open(output_file_path, 'w') as f:
-            for section, entries in sections.items():
+            for section, entries in section_data.items():
                 f.write(f"## {section}\n## {'-' * len(section)}\n\n")
-                for keyword, describe, value in entries:
-                    inline = describe.split('\n')[0]
-                    f.write(f"{keyword:<26}{inline}\n")
-                    f.write(f"{value}\n\n")
+                for entry in entries:
+                    inline = entry['describe'].split('\n')[0]
+                    f.write(f"{entry['keyword']:<26}{inline}\n")
+                    f.write(f"{entry['value']}\n\n")
 
         self.options['snowfilename']['value'] = output_file_path
 
