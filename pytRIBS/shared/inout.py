@@ -253,6 +253,35 @@ class InOut:
 
         self.options['snowfilename']['value'] = output_file_path
 
+    def read_snow_params(self, file_path=None):
+        """
+        Reads a tRIBS snow parameter file (*.spf) and assigns values to self.snow_options.
+        The *.spf file shares the same keyword/value format as the main input file, so the
+        parsing mirrors read_input_file().
+
+        :param file_path: Path to the *.spf file. Defaults to options['snowfilename']['value'],
+            which is set when the main input file is read or when write_snow_params() is called.
+        """
+        if file_path is None:
+            file_path = self.options['snowfilename']['value']
+
+            if file_path is None:
+                print(self.options['snowfilename']['keyword'] + " is not specified.")
+                return None
+
+        with open(file_path, 'r') as file:
+            lines = file.readlines()
+
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            line_lower = line.lower()
+            for key, entry in self.snow_options.items():
+                keyword_lower = entry['keyword'].lower()
+                if line_lower.startswith(keyword_lower) and i + 1 < len(lines):
+                    self.snow_options[key]['value'] = lines[i + 1].strip()
+            i += 1
+
     def read_precip_sdf(self, file_path=None):
         """
         Returns list of precip stations, where information from each station is stored in a dictionary.

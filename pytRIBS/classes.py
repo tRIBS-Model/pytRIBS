@@ -119,6 +119,10 @@ class Model(Infile, Shared, Aux, ModelProcessor, Preprocess, InOut):
         if input_file is not None:
             self.read_input_file(input_file)
 
+            # Load snow parameters from the *.spf file if one is referenced
+            if self.options['snowfilename']['value'] is not None:
+                self.read_snow_params()
+
         Meta.__init__(self)
 
         if meta is not None:
