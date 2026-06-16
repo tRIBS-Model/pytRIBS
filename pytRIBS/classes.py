@@ -387,6 +387,11 @@ class Mesh:
         self.graphoption = options['graphoption']
         self.demfile = options['demfile']
 
+        # Solar position options auto-populated from the watershed centroid (see update_solar_position)
+        self.utcoffset = options['utcoffset']
+        self.centroidlat = options['centroidlat']
+        self.centroidlong = options['centroidlong']
+
 
 class Met(MetProcessor):
     """
@@ -437,3 +442,8 @@ class Met(MetProcessor):
         self.hydrometgrid = options['hydrometgrid']
         self.rainsource = options['rainsource']
         self.rainextension = options['rainextension']
+
+        # Solar position options auto-populated from the watershed centroid (see update_solar_position)
+        self.utcoffset = options['utcoffset']
+        self.centroidlat = options['centroidlat']
+        self.centroidlong = options['centroidlong']

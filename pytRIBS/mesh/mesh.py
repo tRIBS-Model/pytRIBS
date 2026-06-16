@@ -24,6 +24,7 @@ import pyvista as pv
 from shapely.ops import unary_union
 
 from pytRIBS.shared.inout import InOut
+from pytRIBS.shared.aux import Aux
 
 from pytRIBS.shared.shared_mixin import Meta, Shared
 from pytRIBS.mesh.run_docker import MeshBuilderDocker
@@ -390,6 +391,10 @@ class Preprocess:
             gdf = gdf.dissolve()
         gdf.set_crs(epsg=self.meta["EPSG"],inplace=True)
         gdf.to_file(output_path)
+
+        # Auto-populate the solar position keywords (CENTROIDLAT/CENTROIDLONG/UTCOFFSET) from
+        # the watershed centroid. Users can still set these manually like any other option.
+        Aux.update_solar_position(self, gdf.geometry.iloc[0])
 
         return gdf, output_path
 

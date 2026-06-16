@@ -344,11 +344,11 @@ class InOut:
     def read_precip_station(file_path):
         """
         Returns pandas dataframe of precipitation from a station specified by file_path.
-        :param file_path: Flat file with columns Y M D H R
+        :param file_path: tRIBS precip data file (*.mdf), comma-delimited with header Y,M,D,H,R
         :return: Pandas dataframe
         """
         # TODO add var for specifying Station ID
-        df = pd.read_csv(file_path, header=0, sep=r"\s+")
+        df = pd.read_csv(file_path, header=0, sep=',')
         df.rename(columns={'Y': 'year', 'M': 'month', 'D': 'day', 'H': 'hour'}, inplace=True)
         df['date'] = pd.to_datetime(df[['year', 'month', 'day', 'hour']])
         df.drop(['year', 'month', 'day', 'hour'], axis=1, inplace=True)
@@ -385,9 +385,10 @@ class InOut:
     @staticmethod
     def write_precip_station(df, output_file_path):
         """
-        Converts a DataFrame with 'date' and 'R' columns to flat file format with columns Y M D H R.
+        Converts a DataFrame with 'date' and 'R' columns to the tRIBS precip data file
+        (*.mdf) format: comma-delimited with header Y,M,D,H,R.
         :param df: Pandas DataFrame with 'date' and 'R' columns.
-        :param output_file_path: Output flat file path.
+        :param output_file_path: Output *.mdf path.
         """
         # Extract Y, M, D, and H from the 'date' column
         df['Y'] = df['date'].dt.year
@@ -399,7 +400,7 @@ class InOut:
         df = df[['Y', 'M', 'D', 'H', 'R']]
 
         # Write DataFrame to flat file
-        df.to_csv(output_file_path, sep=' ', index=False)
+        df.to_csv(output_file_path, sep=',', index=False)
 
     def read_met_sdf(self, file_path=None):
         """
@@ -425,57 +426,68 @@ class InOut:
         Parameters
         ----------
         file_path : str
-            Path to the meteorological station data file. The file should be in a space-separated format with columns for
-            year, month, day, and hour.
+            Path to the *.mdf file. The file is comma-delimited with the header
+            Year,Month,Day,Hour,PA_mb,RH_pct,XC_tenths,US_m/s,TA_C,IS_W/m2,TS_C.
 
         Returns
         -------
         pandas.DataFrame
-            A DataFrame containing the meteorological data with a single 'date' column as a datetime index, and the remaining
-            columns from the input file.
+            A DataFrame with a single 'date' column built from Year/Month/Day/Hour, and the
+            meteorological variables under their short names: PA, RH, XC, US, TA, IS, TS.
 
         Notes
         -----
-        - The function expects the input file to have columns 'Y', 'M', 'D', and 'H' for year, month, day, and hour, respectively.
-        - The columns for year, month, day, and hour are converted into a single 'date' column of datetime type.
-        - The original columns 'Y', 'M', 'D', and 'H' are dropped from the DataFrame after the datetime conversion.
+        - The descriptive, unit-bearing header columns are mapped to the short variable names.
+        - Year/Month/Day/Hour are combined into a single 'date' column and dropped.
         """
-        # TODO add var for specifying Station ID and doc
-        df = pd.read_csv(file_path, header=0, sep=r'\s+')
-        # convert year, month, day to datetime and drop columns
-        df.rename(columns={'Y': 'year', 'M': 'month', 'D': 'day', 'H': 'hour'}, inplace=True)
+        df = pd.read_csv(file_path, header=0, sep=',')
+        df.rename(columns={'Year': 'year', 'Month': 'month', 'Day': 'day', 'Hour': 'hour',
+                           'PA_mb': 'PA', 'RH_pct': 'RH', 'XC_tenths': 'XC', 'US_m/s': 'US',
+                           'TA_C': 'TA', 'IS_W/m2': 'IS', 'TS_C': 'TS'}, inplace=True)
         df['date'] = pd.to_datetime(df[['year', 'month', 'day', 'hour']])
         df = df.drop(['year', 'month', 'day', 'hour'], axis=1)
         return df
+
     @staticmethod
     def write_met_station(df, output_file_path):
         """
-        Converts a DataFrame with 'date' and 'PA','TD' or 'RH' or 'VP','XC','US','TA','TS','NR' columns to flat file format.
-        See tRIBS documentation for more details on weather station data structure (i.e. *mdf files).
-        :param df: Pandas DataFrame with 'date' and 'R' columns.
-        :param output_file_path: Output flat file path.
+        Converts a DataFrame with a 'date' column and meteorological variables to the tRIBS 
+         meteorological data file (*.mdf) format: comma-delimited with the header
+        Year,Month,Day,Hour,PA_mb,RH_pct,XC_tenths,US_m/s,TA_C,IS_W/m2,TS_C.
+
+        Relative humidity (RH) is the only accepted humidity input in v6.0.0; the pre-v6.0.0
+        TD/VP alternatives and the unused net radiation (NR) column have been removed. Cloud
+        cover (XC) and surface temperature (TS) are required columns but are typically 9999.99;
+        if absent from df they are written as 9999.99.
+
+        :param df: Pandas DataFrame with a 'date' column and at least 'PA', 'RH', 'US', 'TA',
+            and 'IS' columns.
+        :param output_file_path: Output *.mdf path.
         """
-        # Extract Y, M, D, and H from the 'date' column
-        df['Y'] = df['date'].dt.year
-        df['M'] = df['date'].dt.month
-        df['D'] = df['date'].dt.day
-        df['H'] = df['date'].dt.hour
+        if 'RH' not in df.columns:
+            print("Error: 'RH' (relative humidity) is required for the v6.0.0 met data file.")
+            return
 
-        # Format 'D' and 'H' columns with zero-padding
-        df['D'] = df['D'].apply(lambda x: str(x).zfill(2))
-        df['H'] = df['H'].apply(lambda x: str(x).zfill(2))
+        df = df.copy()
 
-        # Check which column ('TD', 'RH', or 'VP') is present in the DataFrame
-        present_column = next((col for col in ['TD', 'RH', 'VP'] if col in df.columns), None)
+        # Extract Year, Month, Day, Hour from the 'date' column
+        df['Year'] = df['date'].dt.year
+        df['Month'] = df['date'].dt.month
+        df['Day'] = df['date'].dt.day
+        df['Hour'] = df['date'].dt.hour
 
-        if present_column is not None:
-            # Reorder columns
-            df = df[['Y', 'M', 'D', 'H', 'PA', present_column, 'XC', 'US', 'TA', 'IS', 'TS', 'NR']]
+        # XC and TS are required columns but are typically the 9999.99 fill value
+        if 'XC' not in df.columns:
+            df['XC'] = 9999.99
+        if 'TS' not in df.columns:
+            df['TS'] = 9999.99
 
-            # Write DataFrame to flat file with tab as separator
-            df.to_csv(output_file_path, sep='\t', index=False)
-        else:
-            print("Error: One of 'TD', 'RH', or 'VP' column must be present in the DataFrame.")
+        columns = ['Year', 'Month', 'Day', 'Hour', 'PA', 'RH', 'XC', 'US', 'TA', 'IS', 'TS']
+        header = 'Year,Month,Day,Hour,PA_mb,RH_pct,XC_tenths,US_m/s,TA_C,IS_W/m2,TS_C'
+
+        with open(output_file_path, 'w') as f:
+            f.write(header + '\n')
+            df[columns].to_csv(f, header=False, index=False)
 
 
     @staticmethod

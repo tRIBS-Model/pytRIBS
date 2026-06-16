@@ -658,7 +658,6 @@ class MetProcessor(Aux, InOut):
             # Update to tRIBS variables
             df['XC'] = 9999.99
             df['TS'] = 9999.99
-            df['NR'] = 9999.99
             df['psurf'] *= 0.01  # Convert pressure from Pa to hPa
 
             # Calculate Wind Speed
@@ -699,7 +698,7 @@ class MetProcessor(Aux, InOut):
             met_file_path = os.path.join(met_dir, met_file)
 
             self.write_precip_station(df[['R', 'date']].copy(), precip_file_path)
-            self.write_met_station(df[['PA', 'RH', 'XC', 'TS', 'NR', 'TA', 'US', 'VP', 'IS', 'date']].copy(),
+            self.write_met_station(df[['PA', 'RH', 'XC', 'TS', 'TA', 'US', 'IS', 'date']].copy(),
                                     met_file_path)
 
             # Update sdf dictionaries
@@ -767,6 +766,11 @@ class MetProcessor(Aux, InOut):
         lat, lon, gmt = self.polygon_centroid_to_geographic(watershed)
         x, y = watershed.centroid.x, watershed.centroid.y
         centroids = [(x,y)]
+
+        # Store the centroid and UTC offset for tRIBS solar position calculations
+        self.centroidlat['value'] = lat
+        self.centroidlong['value'] = lon
+        self.utcoffset['value'] = gmt
 
         if elev is None:
             print("No elevation provided. Downloading NLDAS-2 elevation grid...")
