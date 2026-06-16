@@ -1406,20 +1406,17 @@ class SoilProcessor:
         tribsvars.append(ks_decay_param)
         tribsvars.append('theta_s')
         ref_depth = '0-5cm'
-
-        num_param = len(scgrid_vars)
-        lat, lon, gmt = self._polygon_centroid_to_geographic(watershed)
         ext = 'asc'
 
+        # Location and GMT now live in the main input file, not the .gdf (wired separately).
         with open('scgrid.gdf', 'w') as file:
-            file.write(str(num_param) + '\n')
-            file.write(f"{str(lat)}    {str(lon)}     {str(gmt)}\n")
+            file.write("Variable,BasePath,FileExtension\n")
 
             for scgrid, prefix in zip(scgrid_vars, tribsvars):
                 if scgrid == 'FD':
-                    file.write(f"{scgrid}    {relative_path}{prefix}    {ext}\n")
+                    file.write(f"{scgrid},{relative_path}{prefix},{ext}\n")
                 else:
-                    file.write(f"{scgrid}    {relative_path}{prefix}_{ref_depth}    {ext}\n")
+                    file.write(f"{scgrid},{relative_path}{prefix}_{ref_depth},{ext}\n")
 
         os.chdir(init_dir)
 
