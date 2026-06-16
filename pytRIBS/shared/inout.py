@@ -282,47 +282,63 @@ class InOut:
                     self.snow_options[key]['value'] = lines[i + 1].strip()
             i += 1
 
-    def read_precip_sdf(self, file_path=None):
+    @staticmethod
+    def read_sdf(file_path):
         """
-        Returns list of precip stations, where information from each station is stored in a dictionary.
-        :param file_path: Reads from options["hydrometstations"]["value"], but can be separately specified.
-        :return: List of dictionaries.
+        Reads a tRIBS station descriptor file (*.sdf) and returns a list of station
+        dictionaries. Both the precipitation and hydrometeorological station files share this
+        format: a single descriptive header line that tRIBS skips, followed by comma-delimited
+        rows of ID,DataFile,Northing,Easting,Elevation:
+
+        ID,DataFile,Northing,Easting,Elevation
+        1,data/model/precip/precip_U.mdf,3891469.290931,400109.778323,2188.5
+
+        :param file_path: Path to the *.sdf file.
+        :return: List of dictionaries, one per station, with keys 'station_id', 'file_path',
+            'y' (northing), 'x' (easting), and 'elevation'.
         """
-
-        if file_path is None:
-            file_path = self.options["gaugestations"]["value"]
-
-            if file_path is None:
-                print(self.options["gaugestations"]["key_word"] + "is not specified.")
-                return None
-
         station_list = []
 
         with open(file_path, 'r') as file:
             lines = file.readlines()
 
-        metadata = lines.pop(0)
-        num_stations, num_parameters = map(int, metadata.strip().split())
+        lines.pop(0)  # discard the descriptive header line (skipped by tRIBS)
 
         for l in lines:
-            station_info = l.strip().split()
-            if len(station_info) == 7:
-                station_id, file_path, lat, long, record_length, num_params, elevation = station_info
-                station = {
-                    "station_id": station_id,
-                    "file_path": file_path,
-                    "y": float(lat),
-                    "x": float(long),
-                    "record_length": int(record_length),
-                    "num_parameters": int(num_params),
-                    "elevation": float(elevation)
-                }
-                station_list.append(station)
+            if not l.strip():
+                continue
 
-        if len(station_list) != num_stations:
-            print("Error: Number of stations does not match the specified count.")
+            info = [v.strip() for v in l.strip().split(',')]
+            if len(info) == 5:
+                station_id, data_file, northing, easting, elevation = info
+                station_list.append({
+                    "station_id": station_id,
+                    "file_path": data_file,
+                    "y": float(northing),
+                    "x": float(easting),
+                    "elevation": float(elevation)
+                })
+            else:
+                print(f"Skipping row in {file_path}: expected 5 comma-separated values, "
+                      f"got {len(info)}.")
 
         return station_list
+
+    def read_precip_sdf(self, file_path=None):
+        """
+        Returns list of precip stations read from the *.sdf referenced by the GAUGESTATIONS
+        option (or a separately specified file_path). See read_sdf for the file format.
+        :param file_path: Defaults to options["gaugestations"]["value"].
+        :return: List of dictionaries.
+        """
+        if file_path is None:
+            file_path = self.options["gaugestations"]["value"]
+
+            if file_path is None:
+                print(self.options["gaugestations"]["keyword"] + " is not specified.")
+                return None
+
+        return self.read_sdf(file_path)
 
     @staticmethod
     def read_precip_station(file_path):
@@ -340,22 +356,31 @@ class InOut:
         return df
 
     @staticmethod
-    def write_precip_sdf(station_list, output_file_path):
+    def write_sdf(station_list, output_file_path):
         """
-        Writes a list of precip stations to a flat file.
-        :param station_list: List of dictionaries containing station information.
-        :param output_file_path: Output flat file path.
+        Writes a list of station dictionaries to a tRIBS v6.0.0 station descriptor file (*.sdf):
+        a single descriptive header line (skipped by tRIBS) followed by comma-delimited rows of
+        ID,DataFile,Northing,Easting,Elevation. Used for both precipitation and
+        hydrometeorological station files.
+
+        :param station_list: List of dictionaries with keys 'station_id', 'file_path',
+            'y' (northing), 'x' (easting), and 'elevation'.
+        :param output_file_path: Output *.sdf path.
         """
         with open(output_file_path, 'w') as file:
-            # Write metadata line
-            metadata = f"{len(station_list)} {len(station_list[0])}\n"
-            file.write(metadata)
-
-            # Write station information
+            file.write("ID,DataFile,Northing,Easting,Elevation\n")
             for station in station_list:
-                line = f"{station['station_id']} {station['file_path']} {station['y']} {station['x']} " \
-                       f"{station['record_length']} {station['num_parameters']} {station['elevation']}\n"
-                file.write(line)
+                file.write(f"{station['station_id']},{station['file_path']},"
+                           f"{station['y']},{station['x']},{station['elevation']}\n")
+
+    @staticmethod
+    def write_precip_sdf(station_list, output_file_path):
+        """
+        Writes a list of precip stations to a *.sdf file. See write_sdf for the file format.
+        :param station_list: List of dictionaries containing station information.
+        :param output_file_path: Output *.sdf path.
+        """
+        InOut.write_sdf(station_list, output_file_path)
 
     @staticmethod
     def write_precip_station(df, output_file_path):
@@ -378,48 +403,19 @@ class InOut:
 
     def read_met_sdf(self, file_path=None):
         """
-        Returns list of met stations, where information from each station is stored in a dictionary.
-        :param file_path: Reads from options["hydrometstations"]["value"], but can be separately specified.
+        Returns list of met stations read from the *.sdf referenced by the HYDROMETSTATIONS
+        option (or a separately specified file_path). See read_sdf for the file format.
+        :param file_path: Defaults to options["hydrometstations"]["value"].
         :return: List of dictionaries.
         """
         if file_path is None:
             file_path = self.options["hydrometstations"]["value"]
 
             if file_path is None:
-                print(self.options["hydrometstations"]["key_word"] + "is not specified.")
+                print(self.options["hydrometstations"]["keyword"] + " is not specified.")
                 return None
 
-        station_list = []
-
-        with open(file_path, 'r') as file:
-            lines = file.readlines()
-
-        metadata = lines.pop(0)
-        num_stations, num_parameters = map(int, metadata.strip().split())
-
-        for l in lines:
-            station_info = l.strip().split()
-
-            if len(station_info) == 10:
-                station_id, file_path, lat, y, long, x, gmt, record_length, num_params, other = station_info
-                station = {
-                    "station_id": station_id,
-                    "file_path": file_path,
-                    "lat_dd": float(lat),
-                    "x": float(x),
-                    "long_dd": float(long),
-                    "y": float(y),
-                    "GMT": int(gmt),
-                    "record_length": int(record_length),
-                    "num_parameters": int(num_params),
-                    "other": other
-                }
-                station_list.append(station)
-
-        if len(station_list) != num_stations:
-            print("Error: Number of stations does not match the specified count.")
-
-        return station_list
+        return self.read_sdf(file_path)
 
     @staticmethod
     def read_met_station(file_path):
@@ -483,22 +479,18 @@ class InOut:
 
 
     @staticmethod
-    def write_met_sdf(output_file_path, station_list):
+    def write_met_sdf(station_list, output_file_path):
         """
-        Writes a list of meteorological stations to a flat file (i.e. *.sdf file).
-        :param station_list: List of dictionaries containing station information.
-        :param output_file_path: Output flat file path.
-        """
-        with open(output_file_path, 'w') as file:
-            # Write metadata line
-            metadata = f"{len(station_list)} {len(station_list[0])}\n"
-            file.write(metadata)
+        Writes a list of meteorological stations to a *.sdf file. See write_sdf for the file
+        format.
 
-            # Write station information
-            for station in station_list:
-                line = f"{station['station_id']} {station['file_path']} {station['lat_dd']} {station['y']} {station['long_dd']} {station['x']} " \
-                       f"{station['GMT']} {station['record_length']} {station['num_parameters']} {station['other']}\n"
-                file.write(line)
+        Note: the argument order changed in v1.0.0 to (station_list, output_file_path) to match
+        write_precip_sdf.
+
+        :param station_list: List of dictionaries containing station information.
+        :param output_file_path: Output *.sdf path.
+        """
+        InOut.write_sdf(station_list, output_file_path)
 
     def read_landuse_table(self, file_path=None):
         """

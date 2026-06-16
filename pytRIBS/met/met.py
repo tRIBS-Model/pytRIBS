@@ -622,8 +622,6 @@ class MetProcessor(Aux, InOut):
 
         # Hard coded params for writing
         count = 1
-        num_params_precip = 5
-        num_params_met = 12
 
         # Physical constants
         L = 2.453 * 10 ** 6  # Latent heat of vaporization (J/kg)
@@ -654,10 +652,8 @@ class MetProcessor(Aux, InOut):
                 df = df.loc[orig_begin:orig_end].copy()
 
             # Initialize dictionaries for station details
-            met_sdf = {'station_id': None, 'file_path': None, 'lat_dd': None, 'y': None, 'long_dd': None, 'x': None,
-                       'GMT': None, 'record_length': None, 'num_parameters': None, 'other': None}
-            precip_sdf = {'station_id': None, 'file_path': None, 'y': None, 'x': None, 'record_length': None,
-                          'num_parameters': None, 'elevation': None}
+            met_sdf = {'station_id': None, 'file_path': None, 'y': None, 'x': None, 'elevation': None}
+            precip_sdf = {'station_id': None, 'file_path': None, 'y': None, 'x': None, 'elevation': None}
 
             # Update to tRIBS variables
             df['XC'] = 9999.99
@@ -712,38 +708,25 @@ class MetProcessor(Aux, InOut):
             met_sdf['file_path'] = met_file_path
             precip_sdf['file_path'] = precip_file_path
 
-            # Geographic coordinates
-            lat = station_coords[count - 1][2]
+            # Geographic coordinates (UTM northing/easting) and elevation
             y = station_coords[count - 1][3]
-            long = station_coords[count - 1][0]
             x = station_coords[count - 1][1]
-
-            met_sdf['lat_dd'] = lat
-            met_sdf['long_dd'] = long
+            elevation = station_coords[count - 1][4]
 
             met_sdf['x'] = x
             met_sdf['y'] = y
             precip_sdf['x'] = x
             precip_sdf['y'] = y
 
-            met_sdf['GMT'] = gmt
-            precip_sdf['elevation'] = station_coords[count - 1][4]
-            met_sdf['other'] = station_coords[count - 1][4]
-
-            met_sdf['num_parameters'] = num_params_met
-            precip_sdf['num_parameters'] = num_params_precip
-
-            length = len(df['date'])
-
-            met_sdf['record_length'] = length
-            precip_sdf['record_length'] = length
+            met_sdf['elevation'] = elevation
+            precip_sdf['elevation'] = elevation
 
             met_sdf_list.append(met_sdf)
             precip_sdf_list.append(precip_sdf)
 
             count += 1
 
-        self.write_met_sdf(met_path, met_sdf_list)
+        self.write_met_sdf(met_sdf_list, met_path)
         self.write_precip_sdf(precip_sdf_list, precip_path)
 
     def run_met_workflow(self, watershed, begin, end, elev=None):
