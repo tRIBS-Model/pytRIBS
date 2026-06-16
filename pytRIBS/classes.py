@@ -114,9 +114,14 @@ class Model(Infile, Shared, Aux, ModelProcessor, Preprocess, InOut):
     def __init__(self, input_file=None, met=None, land=None, soil=None, mesh=None, meta=None):
         # attributes
         self.options = self.create_input_file()  # input options for tRIBS model run
+        self.snow_options = self.create_snow_params()  # snow module parameter options
 
         if input_file is not None:
             self.read_input_file(input_file)
+
+            # Load snow parameters from the *.spf file if one is referenced
+            if self.options['snowfilename']['value'] is not None:
+                self.read_snow_params()
 
         Meta.__init__(self)
 
@@ -136,6 +141,8 @@ class Model(Infile, Shared, Aux, ModelProcessor, Preprocess, InOut):
     def __getattr__(self, name):
         if name in self.options:
             return self.options[name]
+        if name in self.snow_options:
+            return self.snow_options[name]
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
     def __dir__(self):

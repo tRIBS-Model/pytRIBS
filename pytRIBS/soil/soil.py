@@ -179,94 +179,113 @@ class SoilProcessor:
         with open(file_path, 'r') as file:
             lines = file.readlines()
 
-        metadata = lines.pop(0)
-        num_types, num_params = map(int, metadata.strip().split())
+        lines.pop(0)  # discard the descriptive header line (skipped by tRIBS)
         param_standard = 12
 
-        if textures:
-            param_standard += 1
-
-        if num_params != param_standard:
-            print(f"The number parameters in {file_path} do not conform with standard soil .sdt format.")
-            return
-
         for l in lines:
-            soil_info = l.strip().split()
+            if not l.strip():
+                continue
+
+            soil_info = [v.strip() for v in l.strip().split(',')]
 
             if len(soil_info) == param_standard:
-                if textures:
-                    _id, ks, theta_s, theta_r, m, psi_b, f, a_s, a_u, n, _ks, c_s, textures = soil_info
-                    station = {
-                        "ID": _id,
-                        "Ks": ks,
-                        "thetaS": theta_s,
-                        "thetaR": theta_r,
-                        "m": m,
-                        "PsiB": psi_b,
-                        "f": f,
-                        "As": a_s,
-                        "Au": a_u,
-                        "n": n,
-                        "ks": _ks,
-                        "Cs": c_s,
-                        "Texture": textures
-                    }
-                else:
-                    _id, ks, theta_s, theta_r, m, psi_b, f, a_s, a_u, n, _ks, c_s = soil_info
-                    station = {
-                        "ID": _id,
-                        "Ks": ks,
-                        "thetaS": theta_s,
-                        "thetaR": theta_r,
-                        "m": m,
-                        "PsiB": psi_b,
-                        "f": f,
-                        "As": a_s,
-                        "Au": a_u,
-                        "n": n,
-                        "ks": _ks,
-                        "Cs": c_s
-                    }
-
+                _id, ks, theta_s, theta_r, m, psi_b, f, a_s, a_u, n, _ks, c_s = soil_info
+                station = {
+                    "ID": _id,
+                    "Ks": ks,
+                    "thetaS": theta_s,
+                    "thetaR": theta_r,
+                    "m": m,
+                    "PsiB": psi_b,
+                    "f": f,
+                    "As": a_s,
+                    "Au": a_u,
+                    "n": n,
+                    "ks": _ks,
+                    "Cs": c_s
+                }
                 soil_list.append(station)
+            else:
+                print(f"Skipping row in {file_path}: expected {param_standard} comma-separated "
+                      f"values, got {len(soil_info)}.")
 
-        if len(soil_list) != num_types:
-            print("Error: Number of soil types does not match the specified count.")
+        if textures:
+            texture_file = f"{os.path.splitext(file_path)[0]}_textures.csv"
+            if os.path.exists(texture_file):
+                texture_map = self.read_soil_textures(texture_file)
+                for station in soil_list:
+                    station["Texture"] = texture_map.get(station["ID"])
+            else:
+                print(f"Texture reference file {texture_file} not found; 'Texture' not loaded. "
+                      f"Soil textures are written to a sidecar file alongside the .sdt, not into "
+                      f"the table itself.")
+
         return soil_list
+
+    @staticmethod
+    def read_soil_textures(texture_file):
+        """
+        Reads a soil texture reference sidecar (ID,Texture CSV) and returns a dict mapping
+        soil ID -> texture name. This file is for user reference only and is not read by tRIBS;
+        it is written alongside the .sdt by write_soil_table(..., textures=True).
+
+        :param texture_file: Path to the *_textures.csv sidecar file.
+        :return: dict mapping str ID to texture name.
+        """
+        texture_map = {}
+
+        with open(texture_file, 'r') as file:
+            lines = file.readlines()
+
+        lines.pop(0)  # discard the ID,Texture header
+        for l in lines:
+            if not l.strip():
+                continue
+            parts = [v.strip() for v in l.strip().split(',', 1)]
+            if len(parts) == 2:
+                texture_map[parts[0]] = parts[1]
+
+        return texture_map
 
     @staticmethod
     def write_soil_table(soil_list, file_path, textures=False):
         """
-        Writes out Soil Reclassification Table(*.sdt) file with the following format:
-        #Types #Params
-        ID Ks thetaS thetaR m PsiB f As Au n ks Cs
+        Writes out a Soil Reclassification Table (*.sdt) in the tRIBS format: a single
+        descriptive header line (skipped by tRIBS) followed by comma-delimited rows of
+        parameter values:
+
+        ID,Ks_mm/hr,ThetaS_m3/m3,ThetaR_m3/m3,m_[],PsiB_cm,f_1/mm,As_[],Au_[],n_m3/m3,ks_J/msK,Cs_J/m3K
+
+        Soil texture is never written into the .sdt itself: tRIBS reads every value on a row, so
+        a trailing texture column would be parsed as an extra parameter. When textures=True the
+        texture names are instead written to a sidecar reference file, <file_path stem>_textures.csv,
+        with columns ID,Texture. That file is for the user's reference only and is not read by tRIBS.
 
         :param soil_list: List of dictionaries containing soil information specified by .sdt structure above.
         :param file_path: Path to save *.sdt file.
-        :param textures: Optional True/False for writing texture classes to the .sdt file.
+        :param textures: Optional True/False for writing a texture reference sidecar alongside the .sdt.
 
         """
-        param_standard = 12
-
-        if textures:
-            param_standard += 1
+        header = ("ID,Ks_mm/hr,ThetaS_m3/m3,ThetaR_m3/m3,m_[],PsiB_cm,f_1/mm,As_[],Au_[],"
+                  "n_m3/m3,ks_J/msK,Cs_J/m3K")
 
         with open(file_path, 'w') as file:
-            # Write metadata line
-            metadata = f"{len(soil_list)} {param_standard}\n"
-            file.write(metadata)
+            file.write(header + "\n")
 
-            # Write station information
             for type in soil_list:
+                row = [type['ID'], type['Ks'], type['thetaS'], type['thetaR'], type['m'],
+                       type['PsiB'], type['f'], type['As'], type['Au'], type['n'],
+                       type['ks'], type['Cs']]
+                file.write(",".join(str(v) for v in row) + "\n")
 
-                if textures:
-                    line = f"{str(type['ID'])}   {str(type['Ks'])}    {str(type['thetaS'])}    {str(type['thetaR'])}    {str(type['m'])}    {str(type['PsiB'])}    " \
-                           f"{str(type['f'])}    {str(type['As'])}    {str(type['Au'])}    {str(type['n'])}    {str(type['ks'])}    {str(type['Cs'])} {str(type['Texture'])}\n"
-                else:
-                    line = f"{str(type['ID'])}   {str(type['Ks'])}    {str(type['thetaS'])}    {str(type['thetaR'])}    {str(type['m'])}    {str(type['PsiB'])}    " \
-                           f"{str(type['f'])}    {str(type['As'])}    {str(type['Au'])}    {str(type['n'])}    {str(type['ks'])}    {str(type['Cs'])}\n"
-
-                file.write(line)
+        if textures:
+            texture_file = f"{os.path.splitext(file_path)[0]}_textures.csv"
+            with open(texture_file, 'w') as file:
+                file.write("ID,Texture\n")
+                for type in soil_list:
+                    file.write(f"{type['ID']},{type['Texture']}\n")
+            print(f"Soil texture reference written to {texture_file}. This file is for user "
+                  f"reference only and is not read by tRIBS.")
 
     def get_soil_grids(self, bbox, depths, soil_vars, stats, replace=False):
         def retrieve_soil_data(self, bbox, depths, soil_vars, stats):
@@ -1387,20 +1406,17 @@ class SoilProcessor:
         tribsvars.append(ks_decay_param)
         tribsvars.append('theta_s')
         ref_depth = '0-5cm'
-
-        num_param = len(scgrid_vars)
-        lat, lon, gmt = self._polygon_centroid_to_geographic(watershed)
         ext = 'asc'
 
+        # Location and GMT now live in the main input file, not the .gdf (wired separately).
         with open('scgrid.gdf', 'w') as file:
-            file.write(str(num_param) + '\n')
-            file.write(f"{str(lat)}    {str(lon)}     {str(gmt)}\n")
+            file.write("Variable,BasePath,FileExtension\n")
 
             for scgrid, prefix in zip(scgrid_vars, tribsvars):
                 if scgrid == 'FD':
-                    file.write(f"{scgrid}    {relative_path}{prefix}    {ext}\n")
+                    file.write(f"{scgrid},{relative_path}{prefix},{ext}\n")
                 else:
-                    file.write(f"{scgrid}    {relative_path}{prefix}_{ref_depth}    {ext}\n")
+                    file.write(f"{scgrid},{relative_path}{prefix}_{ref_depth},{ext}\n")
 
         os.chdir(init_dir)
 

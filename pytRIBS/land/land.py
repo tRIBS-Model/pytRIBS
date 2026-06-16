@@ -121,8 +121,6 @@ class LandProcessor(InOut):
         for cl in classes:
             class_list.append({
                 'ID': cl,
-                'a': None,
-                'b1': None,
                 'P': None,
                 'S': None,
                 'K': None,
@@ -134,7 +132,8 @@ class LandProcessor(InOut):
                 'V': None,
                 'LAI': None,
                 'theta*_s': None,
-                'theta*_t': None
+                'theta*_t': None,
+                'RZD_m': 9999.99
             })
 
         return classified_image, class_list
@@ -227,8 +226,6 @@ class LandProcessor(InOut):
         for cl in classes:
             class_list.append({
                 'ID': cl,
-                'a': None,
-                'b1': None,
                 'P': None,
                 'S': None,
                 'K': None,
@@ -240,7 +237,8 @@ class LandProcessor(InOut):
                 'V': None,
                 'LAI': None,
                 'theta*_s': None,
-                'theta*_t': None
+                'theta*_t': None,
+                'RZD_m': 9999.99
             })
 
         return classified_data, class_list

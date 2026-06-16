@@ -184,7 +184,103 @@ class InOut:
                 "##=========================================================================\n"
             )
 
+    @staticmethod
+    def create_snow_params():
+        """
+        Creates a dictionary of snow module parameters with default values, mirroring
+        the structure of create_input_file(). Called at Model initialization and stored
+        as self.snow_options. Parameters can be set the same way as main input keywords:
 
+        >>> model.irreducible_sat['value'] = 0.02
+
+        :return: dict of snow parameters keyed by lowercase parameter name.
+        """
+        return {
+            'irreducible_sat':         {'keyword': 'IRREDUCIBLE_SAT:',         'describe': 'Irreducible water saturation (Volumetric fraction of Pore Space)',                                  'value': 0.01,   'section': 'General Snow Parameters'},
+            'k_sat_ref':               {'keyword': 'K_SAT_REF:',               'describe': 'Saturated hydraulic conductivity of snowpack (m/s)',                                                'value': 0.0001, 'section': 'General Snow Parameters'},
+            'min_snow_temp':           {'keyword': 'MIN_SNOW_TEMP:',           'describe': 'Minimum temperature of snow (Celsius)',                                                              'value': -27,    'section': 'General Snow Parameters'},
+            'fresh_snow_density':      {'keyword': 'FRESH_SNOW_DENSITY:',      'describe': 'Fresh snow density baseline (kg/m^3)',                                                               'value': 60,     'section': 'General Snow Parameters'},
+            'canopy_wind_attenuation': {'keyword': 'CANOPY_WIND_ATTENUATION:', 'describe': 'Coefficient of exponential wind attenuation by canopy (Dimensionless)',                             'value': 0.4,    'section': 'General Snow Parameters'},
+            'roughness_length':        {'keyword': 'ROUGHNESS_LENGTH:',        'describe': 'Aerodynamic roughness length (z0) of the snow surface (m)',                                         'value': 0.04,   'section': 'General Snow Parameters'},
+            'albedo_fresh':            {'keyword': 'ALBEDO_FRESH:',            'describe': 'Fresh snow albedo',                                                                                  'value': 0.85,   'section': 'Albedo Parameters'},
+            'albedo_decay_dry':        {'keyword': 'ALBEDO_DECAY_DRY:',        'describe': 'Exponential decay rate of albedo for dry snow',                                                     'value': 0.96,   'section': 'Albedo Parameters'},
+            'albedo_decay_wet':        {'keyword': 'ALBEDO_DECAY_WET:',        'describe': 'Exponential decay rate of albedo for wet snow',                                                     'value': 0.82,   'section': 'Albedo Parameters'},
+            'albedo_min':              {'keyword': 'ALBEDO_MIN:',              'describe': 'Minimum snow albedo which snow cannot decay below',                                                  'value': 0.2,    'section': 'Albedo Parameters'},
+            'albedo_reset_threshold':  {'keyword': 'ALBEDO_RESET_THRESHOLD:',  'describe': 'Minimum snowfall depth required to reset the age of snow surface (mm)',                             'value': 0.5,    'section': 'Albedo Parameters'},
+            'optprecpartition':        {'keyword': 'OPTPRECPARTITION:',        'describe': 'Option for precipitation partitioning scheme\n0  Wet-bulb temperature threshold\n1  Linear transition between min/max temperature', 'value': 0, 'section': 'Precipitation Phase Partitioning Parameters'},
+            'max_wetbulb_temp':        {'keyword': 'MAX_WETBULB_TEMP:',        'describe': 'Upper wet-bulb temperature at which snowfall can occur for OPTPRECPARTITION 0 (Celsius)',           'value': 5,      'section': 'Precipitation Phase Partitioning Parameters'},
+            'min_temp_rain':           {'keyword': 'MIN_TEMP_RAIN:',           'describe': 'Minimum air temperature at which liquid precipitation can occur for OPTPRECPARTITION 1 (Celsius)',  'value': 0,      'section': 'Precipitation Phase Partitioning Parameters'},
+            'max_temp_snow':           {'keyword': 'MAX_TEMP_SNOW:',           'describe': 'Maximum air temperature at which snowfall can occur for OPTPRECPARTITION 1 (Celsius)',              'value': 4,      'section': 'Precipitation Phase Partitioning Parameters'},
+        }
+
+    def write_snow_params(self, output_file_path='data/model/snow_params.spf'):
+        """
+        Writes a tRIBS snow parameter file (*.spf) from self.snow_options and automatically
+        sets the SNOWFILENAME input option to the written file path. This method is only
+        needed when the snow module is enabled (OPTSNOW: 1).
+
+        Parameter values are set the same way as main input file keywords, via self.snow_options:
+
+        Example
+        -------
+        >>> from pytRIBS.classes import Model
+        >>> m = Model()
+
+        >>> # Adjust parameters before writing
+        >>> m.irreducible_sat['value'] = 0.02
+        >>> m.albedo_fresh['value'] = 0.90
+        >>> m.write_snow_params('data/model/snow_params.spf')
+
+        :param output_file_path: Path to write the snow parameter file to. Defaults to
+            'data/model/snow_params.spf', matching the standard project directory structure
+            created by the Project class. If you are not using the default project structure,
+            provide the full path explicitly.
+        """
+        section_data = {}
+        for entry in self.snow_options.values():
+            sec = entry['section']
+            if sec not in section_data:
+                section_data[sec] = []
+            section_data[sec].append(entry)
+
+        with open(output_file_path, 'w') as f:
+            for section, entries in section_data.items():
+                f.write(f"## {section}\n## {'-' * len(section)}\n\n")
+                for entry in entries:
+                    inline = entry['describe'].split('\n')[0]
+                    f.write(f"{entry['keyword']:<26}{inline}\n")
+                    f.write(f"{entry['value']}\n\n")
+
+        self.options['snowfilename']['value'] = output_file_path
+
+    def read_snow_params(self, file_path=None):
+        """
+        Reads a tRIBS snow parameter file (*.spf) and assigns values to self.snow_options.
+        The *.spf file shares the same keyword/value format as the main input file, so the
+        parsing mirrors read_input_file().
+
+        :param file_path: Path to the *.spf file. Defaults to options['snowfilename']['value'],
+            which is set when the main input file is read or when write_snow_params() is called.
+        """
+        if file_path is None:
+            file_path = self.options['snowfilename']['value']
+
+            if file_path is None:
+                print(self.options['snowfilename']['keyword'] + " is not specified.")
+                return None
+
+        with open(file_path, 'r') as file:
+            lines = file.readlines()
+
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            line_lower = line.lower()
+            for key, entry in self.snow_options.items():
+                keyword_lower = entry['keyword'].lower()
+                if line_lower.startswith(keyword_lower) and i + 1 < len(lines):
+                    self.snow_options[key]['value'] = lines[i + 1].strip()
+            i += 1
 
     def read_precip_sdf(self, file_path=None):
         """
@@ -408,9 +504,14 @@ class InOut:
         """
         Returns list of dictionaries for each type of landuse specified in the .ldt file.
 
-        Land Use Reclassification Table Structure (*.ldt, see tRIBS documentation for more details)
-        #Types	#Params
-        ID	a	b1	 P	S	K	b2	Al	 h	Kt	Rs	V LAI theta*_s theta*_t
+        Land Use Reclassification Table Structure (*.ldt). The first line is a
+        descriptive, comma-delimited header that tRIBS skips; each following line is a
+        comma-delimited row of parameter values:
+
+        ID,P_[],S_mm,K_mm/hr,b2_1/mm,Al_[],h_m,Kt_[],Rs_s/m,V_[],LAI_[],Theta*s_[],Theta*t_[],RZD_m
+
+        RZD_m (root zone depth, m) must be present for every type; a value of 9999.99 tells
+        tRIBS to fall back to its internal default.
 
         """
         if file_path is None:
@@ -425,23 +526,19 @@ class InOut:
         with open(file_path, 'r') as file:
             lines = file.readlines()
 
-        metadata = lines.pop(0)
-        num_types, num_params = map(int, metadata.strip().split())
-        param_standard = 15
-
-        if num_params != param_standard:
-            print(f"The number parameters in {file_path} do not conform with standard landuse .sdt format.")
-            return
+        lines.pop(0)  # discard the descriptive header line (skipped by tRIBS)
+        param_standard = 14
 
         for l in lines:
-            land_info = l.strip().split()
+            if not l.strip():
+                continue
+
+            land_info = [v.strip() for v in l.strip().split(',')]
 
             if len(land_info) == param_standard:
-                _id, a, b_1, p, s, k, b_2, al, h, kt, rs, v, lai, tstar_s, tstar_t = land_info
+                _id, p, s, k, b_2, al, h, kt, rs, v, lai, tstar_s, tstar_t, rzd = land_info
                 station = {
                     "ID": _id,
-                    "a": a,
-                    "b1": b_1,
                     "P": p,
                     "S": s,
                     "K": k,
@@ -453,43 +550,59 @@ class InOut:
                     "V": v,
                     "LAI": lai,
                     "theta*_s": tstar_s,
-                    "theta*_t": tstar_t
+                    "theta*_t": tstar_t,
+                    "RZD_m": rzd
                 }
                 landuse_list.append(station)
-
-        if len(landuse_list) != num_types:
-            print("Error: Number of land types does not match the specified count.")
+            else:
+                print(f"Skipping row in {file_path}: expected {param_standard} comma-separated "
+                      f"values, got {len(land_info)}.")
 
         return landuse_list
     @staticmethod
-    def write_landuse_table(landuse_list,file_path):
+    def write_landuse_table(landuse_list, file_path):
         """
-        Writes out Land Use Reclassification Table(*.ldt) file with the following format:
-        #Types	#Params
-        ID	a	b1	 P	S	K	b2	Al	 h	Kt	Rs	V LAI theta*_s theta*_t
+        Writes out a Land Use Reclassification Table (*.ldt) in the tRIBS format: a
+        single descriptive header line (skipped by tRIBS) followed by comma-delimited rows
+        of parameter values:
+
+        ID,P_[],S_mm,K_mm/hr,b2_1/mm,Al_[],h_m,Kt_[],Rs_s/m,V_[],LAI_[],Theta*s_[],Theta*t_[],RZD_m
+
+        Notes:
+        - The Gray (1970) interception parameters (a, b1) present in pre-v6.0.0 land use
+          tables have been removed. Tables written by this function are not compatible with
+          tRIBS versions prior to v6.0.0.
+        - RZD_m (root zone depth, m) must be present for every type. If a dictionary omits it,
+          9999.99 is written, which tells tRIBS to use its internal default.
 
         :param landuse_list: List of dictionaries containing land information specified by .ldt structure above.
-        :param file_path: Path to save *.sdt file.
+        :param file_path: Path to save *.ldt file.
         """
-        param_standard = 15
+        header = ("ID,P_[],S_mm,K_mm/hr,b2_1/mm,Al_[],h_m,Kt_[],Rs_s/m,V_[],LAI_[],"
+                  "Theta*s_[],Theta*t_[],RZD_m")
 
         with open(file_path, 'w') as file:
-            # Write metadata line
-            metadata = f"{len(landuse_list)} {param_standard}\n"
-            file.write(metadata)
+            file.write(header + "\n")
 
-            # Write station information
             for type in landuse_list:
-                line = f"{str(type['ID'])} {str(type['a'])} {str(type['b1'])} {str(type['P'])} {str(type['S'])} {str(type['K'])} " \
-                       f" {str(type['b2'])} {str(type['Al'])} {str(type['h'])} {str(type['Kt'])} {str(type['Rs'])} {str(type['V'])}" \
-                       f" {str(type['LAI'])} {str(type['theta*_s'])} {str(type['theta*_t'])}\n"
-                file.write(line)
+                row = [type['ID'], type['P'], type['S'], type['K'], type['b2'], type['Al'],
+                       type['h'], type['Kt'], type['Rs'], type['V'], type['LAI'],
+                       type['theta*_s'], type['theta*_t'], type.get('RZD_m', 9999.99)]
+                file.write(",".join(str(v) for v in row) + "\n")
 
     def read_grid_data_file(self, grid_type):
         """
-        Returns dictionary with content of a specified Grid Data File (.gdf)
-        :param grid_type: string set to "weather", "soil", of "land", with each corresponding to HYDROMETGRID, SCGRID, LUGRID
-        :return: dictionary containg keys and content: "Number of Parameters","Latitude", "Longitude","GMT Time Zone", "Parameters" (a  list of dicts)
+        Returns dictionary with content of a specified Grid Data File (.gdf).
+
+        The .gdf has a single descriptive header line that tRIBS skips,
+        followed by comma-delimited rows of Variable,BasePath,FileExtension:
+
+        Variable,BasePath,FileExtension
+        KS,data/model/soil/KS,asc
+        TS,data/model/soil/TS,asc
+
+        :param grid_type: string set to "weather", "soil", or "land", with each corresponding to HYDROMETGRID, SCGRID, LUGRID
+        :return: dictionary with keys "Number of Parameters" and "Parameters" (a list of dicts)
         """
 
         if grid_type == "weather":
@@ -502,85 +615,49 @@ class InOut:
         parameters = []
 
         with open(option, 'r') as file:
-            num_parameters = int(file.readline().strip())
-            location_info = file.readline().strip().split()
-            latitude, longitude, gmt_timezone = location_info
+            lines = file.readlines()
 
-            variable_count = 0
+        lines.pop(0)  # discard the descriptive header line (skipped by tRIBS)
 
-            for line in file:
-                parts = line.strip().split()
-                if len(parts) == 3:
-                    variable_name, raster_path, raster_extension = parts
-                    variable_count += 1
+        for line in lines:
+            if not line.strip():
+                continue
 
-                    # path_components = raster_path.split(os.path.sep)
-                    #
-                    # # Exclude the last directory as its actually base name
-                    # raster_path = os.path.sep.join(path_components[:-1])
-
-                    # if raster_path != "NO_DATA":
-                    #     if not os.path.exists(raster_path+'/'+raster_extension):
-                    #         print(
-                    #             f"Warning: Raster file not found for Variable '{variable_name}': {raster_path}")
-                    #         raster_path = None
-                    #     elif os.path.getsize(raster_path) == 0:
-                    #         print(
-                    #             f"Warning: Raster file is empty for Variable '{variable_name}': {raster_path}")
-                    #         raster_path = None
-                    # elif raster_path == "NO_DATA":
-                    #     print(
-                    #         f"Warning: No rasters set for variable '{variable_name}'")
-                    #     raster_path = None
-
-                    parameters.append({
-                        'Variable Name': variable_name,
-                        'Raster Path': raster_path,
-                        'Raster Extension': raster_extension
-                    })
-                else:
-                    print(f"Skipping invalid line: {line}")
-
-            if variable_count > num_parameters:
-                print(
-                    "Warning: The number of variables exceeds the number of parameters. This variable has been reset "
-                    "in dictionary.")
+            parts = [v.strip() for v in line.strip().split(',')]
+            if len(parts) == 3:
+                variable_name, raster_path, raster_extension = parts
+                parameters.append({
+                    'Variable Name': variable_name,
+                    'Raster Path': raster_path,
+                    'Raster Extension': raster_extension
+                })
+            else:
+                print(f"Skipping invalid line: {line}")
 
         return {
-            'Number of Parameters': variable_count,
-            'Latitude': latitude,
-            'Longitude': longitude,
-            'GMT Time Zone': gmt_timezone,
+            'Number of Parameters': len(parameters),
             'Parameters': parameters
         }
 
     @staticmethod
     def write_grid_data_file(grid_file, data):
         """
-        Writes the content of a dictionary to a specified Grid Data File (.gdf)
+        Writes the content of a dictionary to a specified Grid Data File (.gdf) in the tRIBS
+        format: a single descriptive header line (skipped by tRIBS) followed by
+        comma-delimited rows of Variable,BasePath,FileExtension.
+
         :param grid_file: path to write out grid file to.
-        :param data: dictionary containing keys and content: "Number of Parameters", "Latitude", "Longitude", "GMT Time Zone", "Parameters" (a list of dicts)
+        :param data: dictionary containing key "Parameters" (a list of dicts with keys
+            'Variable Name', 'Raster Path', 'Raster Extension')
         :return: None
         """
 
         with open(grid_file, 'w') as file:
-            # Write number of parameters
-            file.write(f"{data['Number of Parameters']}\n")
+            file.write("Variable,BasePath,FileExtension\n")
 
-            # Write location info (Latitude, Longitude, GMT Time Zone)
-            file.write(f"{data['Latitude']} {data['Longitude']} {data['GMT Time Zone']}\n")
-
-            # Write parameters
             for param in data['Parameters']:
-                variable_name = param['Variable Name']
-                raster_path = param['Raster Path']
-                raster_extension = param['Raster Extension']
-
-                # # Check if the raster path exists, and if it doesn't, set it to "NO_DATA"
-                # if not os.path.exists(os.path.join(raster_path, raster_extension)):
-                #     raster_path = "NO_DATA"
-
-                file.write(f"{variable_name} {raster_path} {raster_extension}\n")
+                file.write(f"{param['Variable Name']},{param['Raster Path']},"
+                           f"{param['Raster Extension']}\n")
 
     @staticmethod
     def read_ascii(file_path):
