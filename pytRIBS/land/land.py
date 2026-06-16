@@ -132,7 +132,8 @@ class LandProcessor(InOut):
                 'V': None,
                 'LAI': None,
                 'theta*_s': None,
-                'theta*_t': None
+                'theta*_t': None,
+                'RZD_m': 9999.99
             })
 
         return classified_image, class_list
@@ -236,7 +237,8 @@ class LandProcessor(InOut):
                 'V': None,
                 'LAI': None,
                 'theta*_s': None,
-                'theta*_t': None
+                'theta*_t': None,
+                'RZD_m': 9999.99
             })
 
         return classified_data, class_list

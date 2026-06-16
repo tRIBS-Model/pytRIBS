@@ -504,9 +504,14 @@ class InOut:
         """
         Returns list of dictionaries for each type of landuse specified in the .ldt file.
 
-        Land Use Reclassification Table Structure (*.ldt, see tRIBS documentation for more details)
-        #Types	#Params
-        ID	 P	S	K	b2	Al	 h	Kt	Rs	V LAI theta*_s theta*_t
+        Land Use Reclassification Table Structure (*.ldt). The first line is a
+        descriptive, comma-delimited header that tRIBS skips; each following line is a
+        comma-delimited row of parameter values:
+
+        ID,P_[],S_mm,K_mm/hr,b2_1/mm,Al_[],h_m,Kt_[],Rs_s/m,V_[],LAI_[],Theta*s_[],Theta*t_[],RZD_m
+
+        RZD_m (root zone depth, m) must be present for every type; a value of 9999.99 tells
+        tRIBS to fall back to its internal default.
 
         """
         if file_path is None:
@@ -521,19 +526,17 @@ class InOut:
         with open(file_path, 'r') as file:
             lines = file.readlines()
 
-        metadata = lines.pop(0)
-        num_types, num_params = map(int, metadata.strip().split())
-        param_standard = 13
-
-        if num_params != param_standard:
-            print(f"The number parameters in {file_path} do not conform with standard landuse .ldt format.")
-            return
+        lines.pop(0)  # discard the descriptive header line (skipped by tRIBS)
+        param_standard = 14
 
         for l in lines:
-            land_info = l.strip().split()
+            if not l.strip():
+                continue
+
+            land_info = [v.strip() for v in l.strip().split(',')]
 
             if len(land_info) == param_standard:
-                _id, p, s, k, b_2, al, h, kt, rs, v, lai, tstar_s, tstar_t = land_info
+                _id, p, s, k, b_2, al, h, kt, rs, v, lai, tstar_s, tstar_t, rzd = land_info
                 station = {
                     "ID": _id,
                     "P": p,
@@ -547,40 +550,45 @@ class InOut:
                     "V": v,
                     "LAI": lai,
                     "theta*_s": tstar_s,
-                    "theta*_t": tstar_t
+                    "theta*_t": tstar_t,
+                    "RZD_m": rzd
                 }
                 landuse_list.append(station)
-
-        if len(landuse_list) != num_types:
-            print("Error: Number of land types does not match the specified count.")
+            else:
+                print(f"Skipping row in {file_path}: expected {param_standard} comma-separated "
+                      f"values, got {len(land_info)}.")
 
         return landuse_list
     @staticmethod
     def write_landuse_table(landuse_list, file_path):
         """
-        Writes out Land Use Reclassification Table(*.ldt) file with the following format:
-        #Types	#Params
-        ID	 P	S	K	b2	Al	 h	Kt	Rs	V LAI theta*_s theta*_t
+        Writes out a Land Use Reclassification Table (*.ldt) in the tRIBS format: a
+        single descriptive header line (skipped by tRIBS) followed by comma-delimited rows
+        of parameter values:
 
-        Note: the Gray (1970) interception parameters (a, b1) present in pre-v6.0.0
-        land use tables have been removed. Tables written by this function are not
-        compatible with tRIBS versions prior to v6.0.0.
+        ID,P_[],S_mm,K_mm/hr,b2_1/mm,Al_[],h_m,Kt_[],Rs_s/m,V_[],LAI_[],Theta*s_[],Theta*t_[],RZD_m
+
+        Notes:
+        - The Gray (1970) interception parameters (a, b1) present in pre-v6.0.0 land use
+          tables have been removed. Tables written by this function are not compatible with
+          tRIBS versions prior to v6.0.0.
+        - RZD_m (root zone depth, m) must be present for every type. If a dictionary omits it,
+          9999.99 is written, which tells tRIBS to use its internal default.
 
         :param landuse_list: List of dictionaries containing land information specified by .ldt structure above.
         :param file_path: Path to save *.ldt file.
         """
-        param_standard = 13
+        header = ("ID,P_[],S_mm,K_mm/hr,b2_1/mm,Al_[],h_m,Kt_[],Rs_s/m,V_[],LAI_[],"
+                  "Theta*s_[],Theta*t_[],RZD_m")
 
         with open(file_path, 'w') as file:
-            metadata = f"{len(landuse_list)} {param_standard}\n"
-            file.write(metadata)
+            file.write(header + "\n")
 
             for type in landuse_list:
-                line = (f"{str(type['ID'])} {str(type['P'])} {str(type['S'])} {str(type['K'])} "
-                        f"{str(type['b2'])} {str(type['Al'])} {str(type['h'])} {str(type['Kt'])} "
-                        f"{str(type['Rs'])} {str(type['V'])} {str(type['LAI'])} "
-                        f"{str(type['theta*_s'])} {str(type['theta*_t'])}\n")
-                file.write(line)
+                row = [type['ID'], type['P'], type['S'], type['K'], type['b2'], type['Al'],
+                       type['h'], type['Kt'], type['Rs'], type['V'], type['LAI'],
+                       type['theta*_s'], type['theta*_t'], type.get('RZD_m', 9999.99)]
+                file.write(",".join(str(v) for v in row) + "\n")
 
     def read_grid_data_file(self, grid_type):
         """
