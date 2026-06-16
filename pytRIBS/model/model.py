@@ -110,7 +110,7 @@ class ModelProcessor:
 
         print("\nChecking if grid files exist.\n")
 
-        if int(instance.options["optlanduse"]["value"]) == 1:
+        if int(instance.options["optlanduse"]["value"]) in (1, 2):
             print("Model is set to read landuse grid files: checking paths and .gdf file")
             instance.read_grid_data_file("land")
 
