@@ -15,24 +15,24 @@ A full tRIBS model setup, simulation, and analysis is provided [here.](https://z
 PytRIBS uses semantic versioning. Currently, we are in the initial development phase--anything MAY change at any time and
 this package SHOULD NOT be considered stable.
 
-## [1.0.0] - Unreleased
+## v1.0.0 (Unreleased)
 pytRIBS v1.0.0 is the first stable release of the package, moving out of beta and aligning pytRIBS with the tRIBS v6.0.0 model release. Because it targets the reworked v6.0.0 input structure, this release is not backwards compatible with files produced for earlier tRIBS versions. This version standardizes how pytRIBS reads and writes the soil, land use, and gridded parameter files to the new v6.0.0 format, adds support for the new snow parameter file (`.spf`), and updates the data-processing workflows that generate these files. **For examples of the updated v6.0.0 input structure and the new snow parameter files (.spf), see our [example repository](https://github.com/tRIBS-Model/pytRIBS-examples).**
 
 The v1.0.0 changes listed below are abbreviated. For specific details refer to the tRIBS Wiki or the pull request links associated with each change.   
 
-### Added
+#### Added
 * **Snow Parameter File (`.spf`):** Snow physics constants can now be read from and written to a dedicated `.spf` file, and are loaded automatically when referenced in the main input file. ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/34))
 * **Root Zone Depth Parameter:** Added the `RZD_m` parameter to the land use table (`.ldt`). ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/XX))
 
-### Changed & Refactored
+#### Changed & Refactored
 * **Standardized File Formats:** Reworked the soil (`.sdt`), land use (`.ldt`), and grid data (`.gdf`) readers and writers to the new single-header, comma-delimited v6.0.0 format. ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/34))
 * **Soil Textures:** Soil textures are now written to a `*_textures.csv` sidecar file instead of an extra column in the `.sdt`. ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/34))
 * **Static Land Use Grids:** Grid-file path validation now recognizes the new static gridded land use option (`OPTLANDUSE = 2`). ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/34))
   
-### Removed
+#### Removed
 * **Legacy Land Use Parameters:** Removed the Gray (1970) interception parameters (`a`, `b1`) from the land use table. ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/34))
 
-### Version 0.7.2 (04/02/2026)
+### v0.7.2 (04/02/2026)
 This release fixes an issue users on certain versions of Python and introduces GitHub Actions.
 
 #### Added
@@ -41,10 +41,10 @@ This release fixes an issue users on certain versions of Python and introduces G
 #### Changed
 * Relaxed `earthaccess` requirement from `~=0.15.1` to `>=0.14.0` to resolve a dependency conflict for users on Python 3.10.
 
-### Version 0.7.1 (02/03/2026)
+### v0.7.1 (02/03/2026)
 This release is a small update to add a missing dependency required for downloading and processing the NLDAS-2 elevation raster.
 
-### Version 0.7.0 (02/03/2026)
+### v0.7.0 (02/03/2026)
 This release introduces a set of relatively small changes that fix existing points of confusion or bugs in the code. Additionally, updates to the meteorological workflow to handle changes to the NASA API for downloading NLDAS-2 data.
 
 #### Added
@@ -67,7 +67,7 @@ This release introduces a set of relatively small changes that fix existing poin
     * Loosen package dependencies in `pyproject.toml` to resolve version conflicts.
     * Remove redundant code and improved class initialization in `met.py` to make the code more effective as a standalone workflow.
       
-### Verison 0.6.0 (11/20/2025)
+### v0.6.0 (11/20/2025)
 * Fixed bug in reading landuse table (can only use for model or land class though).
 * Added optional input to write_ascii() that allows user to specify number of decimal places in output raster.
 * Added new function, grid_geodataframe(), in the shared class that is called from the results object. The tool ingests a GDF containing a the voronoi polygon geometry with a spatial output attached and rasterizes that into a data dictionary for file writing.
