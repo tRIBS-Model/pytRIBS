@@ -242,65 +242,34 @@ class LandProcessor(InOut):
             })
 
         return classified_data, class_list
-    def _polygon_centroid_to_geographic(self, polygon, utm_crs=None, geographic_crs="EPSG:4326"):
-        lat,lon, gmt = Aux.polygon_centroid_to_geographic(self,polygon,utm_crs=utm_crs,geographic_crs=geographic_crs)
-        return lat, lon, gmt
 
-    def create_gdf_content(self, parameters, watershed):
+    def create_gdf_content(self, parameters):
         """
-        Create a dictionary containing geographic and parameter information for a watershed.
+        Wraps a list of grid parameters into the dictionary structure expected by
+        write_grid_data_file.
 
-        This function computes the geographic centroid of the given watershed polygon,
-        converts it to geographic coordinates (latitude and longitude), and then creates
-        a dictionary containing the number of parameters, the centroid's geographic location,
-        the GMT time zone, and a list of parameters.
+        Location and GMT information formerly stored here now lives in the main input file
+        (CENTROIDLAT, CENTROIDLONG, UTCOFFSET; see update_solar_position), so the watershed is
+        no longer needed.
 
         Parameters
         ----------
-        parameters : list of list
-            A list where each element is a list containing:
-            - parameter name (str): The name of the parameter (e.g., 'VH').
-            - raster path (str): The file path to the specified raster.
-            - file extension (str): The extension of the raster file (e.g., '.tif').
-        watershed : GeoDataFrame or shapely.geometry.Polygon
-            The watershed boundary used to compute the centroid and derive geographic coordinates.
+        parameters : list of dict
+            A list where each element is a dict describing one gridded variable with keys
+            'Variable Name', 'Raster Path', and 'Raster Extension'.
 
         Returns
         -------
         dict
-            A dictionary containing the following key-value pairs:
-            - 'Number of Parameters' : int
-                The number of parameters provided.
-            - 'Latitude' : float
-                The latitude of the watershed centroid in geographic coordinates.
-            - 'Longitude' : float
-                The longitude of the watershed centroid in geographic coordinates.
-            - 'GMT Time Zone' : int
-                The GMT time zone derived from the geographic coordinates.
-            - 'Parameters' : list
-                The original list of parameters provided.
+            A dictionary with 'Number of Parameters' and 'Parameters', ready to pass to
+            write_grid_data_file.
 
         Examples
         --------
-        To create a dictionary of geographic and parameter information for a watershed:
-
         >>> parameters = [
-        ...     ['VH', 'path/to/raster1.tif', '.tif'],
-        ...     ['NDVI', 'path/to/raster2.tif', '.tif']
+        ...     {'Variable Name': 'VH', 'Raster Path': 'path/to/VH', 'Raster Extension': 'asc'}
         ... ]
-        >>> watershed = geopandas.read_file('path/to/watershed.shp')
-        >>> gdf_content = create_gdf_content(parameters, watershed)
-        >>> print(gdf_content['Latitude'], gdf_content['Longitude'])
-
+        >>> gdf_content = land.create_gdf_content(parameters)
+        >>> land.write_grid_data_file(land.lugrid['value'], gdf_content)
         """
-
-        num_params = len(parameters)
-        lat, lon, gmt = self._polygon_centroid_to_geographic(watershed)
-
-        land_gdf_content = {'Number of Parameters': num_params,
-                            'Latitude': lat,  # update
-                            'Longitude': lon,
-                            'GMT Time Zone': gmt,
-                            'Parameters': parameters
-                            }
-        return  land_gdf_content
+        return {'Number of Parameters': len(parameters), 'Parameters': parameters}
