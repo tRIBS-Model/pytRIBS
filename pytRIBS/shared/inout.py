@@ -358,7 +358,7 @@ class InOut:
     @staticmethod
     def write_sdf(station_list, output_file_path):
         """
-        Writes a list of station dictionaries to a tRIBS v6.0.0 station descriptor file (*.sdf):
+        Writes a list of station dictionaries to a tRIBS station descriptor file (*.sdf):
         a single descriptive header line (skipped by tRIBS) followed by comma-delimited rows of
         ID,DataFile,Northing,Easting,Elevation. Used for both precipitation and
         hydrometeorological station files.
@@ -465,7 +465,7 @@ class InOut:
         :param output_file_path: Output *.mdf path.
         """
         if 'RH' not in df.columns:
-            print("Error: 'RH' (relative humidity) is required for the v6.0.0 met data file.")
+            print("Error: 'RH' (relative humidity) is required for the met data file.")
             return
 
         df = df.copy()
@@ -564,7 +564,7 @@ class InOut:
 
         if not landuse_list:
             print(f"Warning: no land use entries were read from {file_path}. Confirm it is in the "
-                  f"tRIBS v6.0.0 format (one descriptive header line, then comma-delimited rows). "
+                  f"tRIBS format (one descriptive header line, then comma-delimited rows). "
                   f"Pre-v6.0.0 tables (a count line with whitespace-delimited rows) are not "
                   f"compatible and must be converted.")
 
