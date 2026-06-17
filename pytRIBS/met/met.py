@@ -789,3 +789,66 @@ class MetProcessor(Aux, InOut):
                                                 orig_begin=begin, orig_end=end)
 
         return nldas_df
+
+    # Variable order for the gridded meteorological grid data file (*.gdf). XC (cloud cover) and
+    # TS (surface temperature) are optional; the rest are required (no lookup-table fallback).
+    MET_GRID_ORDER = ['PA', 'RH', 'XC', 'US', 'TA', 'IS', 'TS']
+    MET_GRID_OPTIONAL = ['XC', 'TS']
+
+    def write_met_grid(self, parameters, output_file_path=None):
+        """
+        Writes a gridded meteorological grid data file (*.gdf) and configures the model to use
+        it by setting HYDROMETGRID to the written path and METDATAOPTION to 2 (gridded met).
+
+        Unlike gridded soil/land use, gridded meteorological data has no lookup-table fallback
+        (METDATAOPTION is an exclusive switch), so every required variable must be present in the
+        grid data file. The required variables are PA, RH, US, TA, and IS. XC (cloud cover) and
+        TS (surface temperature) are optional; if not supplied they are written as NO_DATA rows.
+
+        Example
+        -------
+        >>> params = [
+        ...     {'Variable Name': 'PA', 'Raster Path': 'data/weather/PA', 'Raster Extension': 'asc'},
+        ...     {'Variable Name': 'RH', 'Raster Path': 'data/weather/RH', 'Raster Extension': 'asc'},
+        ...     {'Variable Name': 'US', 'Raster Path': 'data/weather/US', 'Raster Extension': 'asc'},
+        ...     {'Variable Name': 'TA', 'Raster Path': 'data/weather/TA', 'Raster Extension': 'asc'},
+        ...     {'Variable Name': 'IS', 'Raster Path': 'data/weather/IS', 'Raster Extension': 'asc'},
+        ... ]
+        >>> met.write_met_grid(params, 'data/weather/hydrometgrid.gdf')
+
+        :param parameters: list of dicts with keys 'Variable Name', 'Raster Path', 'Raster Extension'.
+        :param output_file_path: Path to write the *.gdf to. Defaults to the current
+            HYDROMETGRID option value if one is set.
+        """
+        if output_file_path is None:
+            output_file_path = self.hydrometgrid['value']
+            if output_file_path is None:
+                print("No output path provided and HYDROMETGRID is not set; "
+                      "provide output_file_path.")
+                return
+
+        param_map = {p['Variable Name']: p for p in parameters}
+
+        required = [v for v in self.MET_GRID_ORDER if v not in self.MET_GRID_OPTIONAL]
+        missing_required = [v for v in required if v not in param_map]
+        if missing_required:
+            print(f"Warning: gridded meteorological data has no lookup-table fallback, but these "
+                  f"required variables are missing: {', '.join(missing_required)}.")
+
+        # Emit variables in canonical order, filling optional variables with NO_DATA when absent
+        ordered = []
+        for v in self.MET_GRID_ORDER:
+            if v in param_map:
+                ordered.append(param_map[v])
+            elif v in self.MET_GRID_OPTIONAL:
+                ordered.append({'Variable Name': v, 'Raster Path': 'NO_DATA',
+                                'Raster Extension': 'NO_DATA'})
+        # Append any extra user-provided variables not part of the standard set
+        for p in parameters:
+            if p['Variable Name'] not in self.MET_GRID_ORDER:
+                ordered.append(p)
+
+        self.write_grid_data_file(output_file_path, {'Parameters': ordered})
+
+        self.hydrometgrid['value'] = output_file_path
+        self.metdataoption['value'] = 2

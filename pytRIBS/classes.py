@@ -440,6 +440,7 @@ class Met(MetProcessor):
         self.gaugestations = options['gaugestations']
         self.rainfile = options['rainfile']
         self.hydrometgrid = options['hydrometgrid']
+        self.metdataoption = options['metdataoption']
         self.rainsource = options['rainsource']
         self.rainextension = options['rainextension']
 
