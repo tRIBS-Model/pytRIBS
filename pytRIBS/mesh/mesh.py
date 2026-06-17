@@ -24,7 +24,6 @@ import pyvista as pv
 from shapely.ops import unary_union
 
 from pytRIBS.shared.inout import InOut
-from pytRIBS.shared.aux import Aux
 
 from pytRIBS.shared.shared_mixin import Meta, Shared
 from pytRIBS.mesh.run_docker import MeshBuilderDocker
@@ -392,10 +391,6 @@ class Preprocess:
         gdf.set_crs(epsg=self.meta["EPSG"],inplace=True)
         gdf.to_file(output_path)
 
-        # Auto-populate the solar position keywords (CENTROIDLAT/CENTROIDLONG/UTCOFFSET) from
-        # the watershed centroid. Users can still set these manually like any other option.
-        Aux.update_solar_position(self, gdf.geometry.iloc[0])
-
         return gdf, output_path
 
     def convert_stream_raster_to_vector(self, stream_raster, flow_direction_raster, output_path=None):
@@ -597,13 +592,15 @@ class Preprocess:
         outlet = self.create_outlet(self.outlet[0], self.outlet[1], flow_acc, self.snap_distance,
                                     output_path=f'{outlet_path}')
         ws_mask = self.generate_watershed_mask(d8_raster, outlet)
-        _, ws_bound = self.generate_watershed_boundary(ws_mask, output_path=f'{boundary_path}')
+        ws_gdf, ws_bound = self.generate_watershed_boundary(ws_mask, output_path=f'{boundary_path}')
         stream_shp = self.convert_stream_raster_to_vector(streams, d8_raster)
         self.clip_rasters([filled], ws_bound, output_dir=output_dir, method='both')
         self.clip_streamline(os.path.abspath(stream_shp), ws_bound, output_path=f'{output_streams_path}')
 
         if clean is True:
             shutil.rmtree(temp)
+
+        return ws_gdf
 
 
 class GenerateMesh:

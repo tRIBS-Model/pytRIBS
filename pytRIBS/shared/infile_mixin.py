@@ -60,9 +60,9 @@ class Infile:
             "utcoffset": {"keyword": "UTCOFFSET:", "describe": "UTC (GMT) offset of the watershed centroid, used for solar position calculations (hours)",
                           "value": None, "tags": ["time"], "section": 1, "subsection": "Solar Position Variables"},
             "centroidlat": {"keyword": "CENTROIDLAT:", "describe": "Latitude of the watershed centroid, used for solar position calculations (decimal degrees)",
-                            "value": None, "tags": ["location"], "section": 1, "subsection": "Solar Position Variables"},
+                            "value": None, "tags": ["solar"], "section": 1, "subsection": "Solar Position Variables"},
             "centroidlong": {"keyword": "CENTROIDLONG:", "describe": "Longitude of the watershed centroid, used for solar position calculations (decimal degrees)",
-                             "value": None, "tags": ["location"], "section": 1, "subsection": "Solar Position Variables"},
+                             "value": None, "tags": ["solar"], "section": 1, "subsection": "Solar Position Variables"},
 
             # ==================================================================================================
             # ROUTING PARAMETERS

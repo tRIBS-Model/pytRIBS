@@ -522,7 +522,7 @@ class InOut:
             file_path = self.landtablename["value"]
 
             if file_path is None:
-                print(self.landtablename["key_word"] + "is not specified.")
+                print(self.landtablename["keyword"] + " is not specified.")
                 return
 
         landuse_list = []
@@ -561,6 +561,12 @@ class InOut:
             else:
                 print(f"Skipping row in {file_path}: expected {param_standard} comma-separated "
                       f"values, got {len(land_info)}.")
+
+        if not landuse_list:
+            print(f"Warning: no land use entries were read from {file_path}. Confirm it is in the "
+                  f"tRIBS v6.0.0 format (one descriptive header line, then comma-delimited rows). "
+                  f"Pre-v6.0.0 tables (a count line with whitespace-delimited rows) are not "
+                  f"compatible and must be converted.")
 
         return landuse_list
     @staticmethod
