@@ -1,12 +1,12 @@
 import numpy as np
 import pandas as pd
 from shapely.geometry import box
-import pynldas2 as nldas
 import pyproj
 import os
 import geopandas as gpd
 from shapely.geometry import Polygon, MultiPolygon
 import xarray as xr
+import rioxarray
 import requests
 from io import BytesIO
 from pytRIBS.shared.inout import InOut
@@ -204,77 +204,6 @@ class MetProcessor(Aux, InOut):
             return pd.concat(results_list)
 
     @staticmethod
-    def get_nldas_geom(geom, begin, end, epsg, write_path=None, **hyriver_env_vars):
-        """
-        Fetch NLDAS-2 data for a given geometry and time period, with optional caching and environment variable configuration.
-
-        This method retrieves NLDAS-2 data for a specified geometry and time range, using the `pynldas2` library.
-        It supports environment variables for controlling caching and verbosity, and optionally saves the resulting
-        xarray dataset to a NetCDF file.
-
-        Parameters
-        ----------
-        geom : str
-            The geometry (as a Polygon or MultiPolygon) for which the data is being requested.
-        begin : str
-            The start date for the data request in 'YYYY-MM-DD' format.
-        end : str
-            The end date for the data request in 'YYYY-MM-DD' format.
-        epsg : int
-            The EPSG code for the coordinate reference system of the geometry.
-        write_path : str, optional
-            The file path where the resulting xarray dataset should be saved as a NetCDF file. If not provided, the
-            dataset is not saved to a file.
-        **hyriver_env_vars : dict, optional
-            Additional keyword arguments representing environment variables to control request/response caching and verbosity.
-            Supported variables include:
-            - HYRIVER_CACHE_NAME: Path to the caching SQLite database for asynchronous HTTP requests.
-            - HYRIVER_CACHE_NAME_HTTP: Path to the caching SQLite database for HTTP requests.
-            - HYRIVER_CACHE_EXPIRE: Expiration time for cached requests in seconds.
-            - HYRIVER_CACHE_DISABLE: Disable reading/writing from/to the cache.
-            - HYRIVER_SSL_CERT: Path to an SSL certificate file.
-
-        Returns
-        -------
-        xarray.Dataset
-            The dataset containing the NLDAS-2 data for the specified geometry and time period.
-
-        Raises
-        ------
-        Exception
-            If an error occurs during the data retrieval or saving process.
-
-        Notes
-        -----
-        - This method uses the `NLDAS-2.get_bygeom` function from the `pynldas2` library to fetch NLDAS-2 data for the specified geometry.
-        - The geometry is automatically converted to a `MultiPolygon` if it is provided as a `Polygon`.
-        - The HyRiver library should be cited as follows:
-          Chegini T, Li H-Y, Leung LR. 2021. HyRiver: Hydroclimate Data Retriever. Journal of Open Source Software 6: 3175.
-          DOI: 10.21105/joss.03175.
-        - If the `write_path` is specified, the resulting dataset is saved as a NetCDF file at the given location.
-        """
-
-        # Assuming gdf is your GeoDataFrame with a 'geometry' column
-
-        # Check if geometry column contains only Polygons
-        if geom.geom_type == 'Polygon':
-            # Convert Polygon to MultiPolygon
-            geom = MultiPolygon([geom])
-
-        # Set environment variables from hyriver_env_vars
-        for key, item in hyriver_env_vars.items():
-            os.environ[key] = item
-
-        # Fetch data using the NLDAS-2 library
-        ds_xarray = nldas.get_bygeom(geom, begin, end, epsg, source='netcdf')
-
-        # Write to NetCDF file if write_path is provided
-        if write_path is not None:
-            ds_xarray.to_netcdf(write_path)
-
-        return ds_xarray
-
-    @staticmethod
     def get_nldas_elevation(watershed, epsg):
         """
         Download the NLDAS-2 elevation grid as a NetCDF file and return it as an xarray Dataset.
@@ -320,7 +249,7 @@ class MetProcessor(Aux, InOut):
             response.raise_for_status()  # Raise an error for unsuccessful status codes
 
             # Open the downloaded content as an xarray DataSet
-            with xr.open_dataset(BytesIO(response.content)) as ds:
+            with xr.open_dataset(BytesIO(response.content), engine='h5netcdf') as ds:
                 dataset = ds.load()  # Load the dataset into memory
 
             # Drop unnecessary variables
@@ -788,7 +717,7 @@ class MetProcessor(Aux, InOut):
         if elev is None:
             print("No elevation provided. Downloading NLDAS-2 elevation grid...")
             ds_elev = self.get_nldas_elevation(watershed, self.meta['EPSG'])
-            elev = float(ds_elev.NLDAS_elev.sel(lon=lon, lat=lat, method='nearest').values)
+            elev = float(ds_elev.NLDAS_elev.sel(lon=lon, lat=lat, method='nearest').squeeze().values)
         else:
             print(f"Using user provided elevation: {elev}m")
     

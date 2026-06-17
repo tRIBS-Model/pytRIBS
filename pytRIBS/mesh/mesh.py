@@ -20,7 +20,6 @@ from whitebox import WhiteboxTools
 from shapely.geometry import Point
 import rasterio
 import pywt
-import pyvista as pv
 from shapely.ops import unary_union
 
 from pytRIBS.shared.inout import InOut
@@ -1157,52 +1156,6 @@ class GenerateMesh:
 
         return median_distance, max_distance
 
-    def convert_coords_to_mesh(self, coords):
-        """
-        Converts a set of coordinates into a 2D mesh using Delaunay triangulation.
-
-        This method takes an array of coordinates and converts them into a 2D mesh. The input coordinates
-        include x, y, and z values, along with an optional boundary code. While the boundary codes label
-        points in the mesh, they currently do not influence the mesh creation.
-
-        Parameters
-        ----------
-        coords : numpy.ndarray
-            An array where each row represents a point with x, y, z coordinates and a boundary code.
-
-        Returns
-        -------
-        pyvista.PolyData
-            A 2D mesh generated from the input coordinates using Delaunay triangulation.
-
-        Raises
-        ------
-        IndexError
-            If the input `coords` array does not have at least four columns.
-        ValueError
-            If the input `coords` array is empty or has incorrect dimensions.
-
-        Notes
-        -----
-        The boundary codes provided in the `coords` array are stored with the mesh but do not currently affect
-        the triangulation process. Elevation data (z-values) are included in the mesh as a scalar field, which
-        could be used for subsequent analysis.
-
-        """
-
-        points = coords[:, :3]  # First three columns are x, y, z
-        boundary_codes = coords[:, 3]  # Fourth column is boundary code
-
-        point_cloud = pv.PolyData(points)
-
-        elevation = points[:, 2]
-        # elevation[boundary_codes == 1] = np.nan  # Set elevation to NaN where boundary code is 1
-        point_cloud['Elevation'] = elevation
-        point_cloud['BoundaryCode'] = boundary_codes
-
-        mesh = point_cloud.delaunay_2d()
-
-        return mesh
 
     def interpolate_elevations(self, points):
         """
@@ -1361,12 +1314,6 @@ class GenerateMesh:
     def write_point_file(gdf, output):
         """Helper function for writing out points file."""
         InOut.write_point_file(gdf, output)
-
-    @staticmethod
-    def plot_mesh(mesh, scalar=None, **kwargs):
-        """Helper function for plotting a PyVista mesh."""
-        plotter = Shared.plot_mesh(mesh, scalar, **kwargs)
-        return plotter
 
     @staticmethod
     def generate_meshbuild_input_file(filename, base_name, point_filename=None, mesh_filename=None):
