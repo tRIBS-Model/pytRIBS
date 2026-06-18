@@ -195,40 +195,40 @@ class Infile:
             # MESH / INPUT FILES
             # ==================================================================================================
 
-            "inputdatafile": {"keyword": "INPUTDATAFILE:", "describe": "tMesh input file base name for Mesh files",
+            "inputdatafile": {"keyword": "INPUTDATAFILE:", "describe": "tMesh input file base name for Mesh files, see OPTMESHINPUT",
                               "value": None, "tags": ["mesh"], "section": 3, "subsection": "Mesh Generation"},
-            "pointfilename": {"keyword": "POINTFILENAME:", "describe": "tMesh input file name Points files",
+            "pointfilename": {"keyword": "POINTFILENAME:", "describe": "tMesh input file name Points files, see OPTMESHINPUT",
                               "value": None, "tags": ["mesh"], "section": 3, "subsection": "Mesh Generation"},
 
             # ==================================================================================================
             # GRID RESAMPLE
             # ==================================================================================================
 
-            "soiltablename": {"keyword": "SOILTABLENAME:", "describe": "Soil parameter reference table (*.sdt)",
+            "soiltablename": {"keyword": "SOILTABLENAME:", "describe": "Soil parameter reference table (*.sdt), see OPTSOILTYPE",
                               "value": None, "tags": ["spatial"], "section": 3, "subsection": "Resampling Grids"},
-            "soilmapname": {"keyword": "SOILMAPNAME:", "describe": "Soil texture ASCII grid (*.soi)", "value": None,
+            "soilmapname": {"keyword": "SOILMAPNAME:", "describe": "Soil texture ASCII grid (*.soi), see OPTSOILTYPE", "value": None,
                             "tags": ["spatial"], "section": 3, "subsection": "Resampling Grids"},
-            "landtablename": {"keyword": "LANDTABLENAME:", "describe": "Land use parameter reference table",
+            "landtablename": {"keyword": "LANDTABLENAME:", "describe": "Land use parameter reference table, see OPTLANDUSE",
                               "value": None, "tags": ["spatial"], "section": 3, "subsection": "Resampling Grids"},
-            "landmapname": {"keyword": "LANDMAPNAME:", "describe": "Land use ASCII grid (*.lan)", "value": None,
+            "landmapname": {"keyword": "LANDMAPNAME:", "describe": "Land use ASCII grid (*.lan), see OPTLANDUSE", "value": None,
                             "tags": ["spatial"], "section": 3, "subsection": "Resampling Grids"},
-            "gwaterfile": {"keyword": "GWATERFILE:", "describe": "Ground water ASCII grid (*iwt)", "value": None,
+            "gwaterfile": {"keyword": "GWATERFILE:", "describe": "Ground water ASCII grid (*iwt), see OPTGWFILE", "value": None,
                            "tags": ["spatial"], "section": 3, "subsection": "Resampling Grids"},
-            "demfile": {"keyword": "DEMFILE:", "describe": "DEM ASCII grid for sky and land view factors (*.dem)",
+            "demfile": {"keyword": "DEMFILE:", "describe": "DEM ASCII grid for sky and land view factors (*.dem), see OPTRADSHELT",
                         "value": None, "tags": ["spatial"], "section": 3, "subsection": "Resampling Grids"},
-            "rainfile": {"keyword": "RAINFILE:", "describe": "Base name of the radar ASCII grid", "value": None,
+            "rainfile": {"keyword": "RAINFILE:", "describe": "Base name of the radar ASCII grid, see RAINSOURCE", "value": None,
                          "tags": ["meterological"], "section": 3, "subsection": "Resampling Grids"},
-            "rainextension": {"keyword": "RAINEXTENSION:", "describe": "Extension for the radar ASCII grid",
+            "rainextension": {"keyword": "RAINEXTENSION:", "describe": "Extension for the radar ASCII grid, see RAINSOURCE",
                               "value": None, "tags": ["meterological"], "section": 3, "subsection": "Resampling Grids"},
-            "raindistribution": {"keyword": "RAINDISTRIBUTION:", "describe": "Precipitation distributed as provided or mean areal precipitation",
+            "raindistribution": {"keyword": "RAINDISTRIBUTION:", "describe": "Precipitation distributed as provided or mean areal precipitation, see RAINSOURCE",
                                  "value": 0, "tags": ["meterological"], "section": 3, "subsection": "Resampling Grids"},
             "depthtobedrock": {"keyword": "DEPTHTOBEDROCK:", "describe": "Uniform depth to bedrock (meters), see OPTBEDROCK",
                                "value": 15, "tags": ["hydro"], "section": 3, "subsection": "Resampling Grids"},
             "bedrockfile": {"keyword": "BEDROCKFILE:", "describe": "Bedrock depth ASCII grid (*.brd), see OPTBEDROCK",
                             "value": None, "tags": ["spatial"], "section": 3, "subsection": "Resampling Grids"},
-            "lugrid": {"keyword": "LUGRID:", "describe": "Land cover grid data file (*.gdf)", "value": None,
+            "lugrid": {"keyword": "LUGRID:", "describe": "Land cover grid data file (*.gdf), see OPTLANDUSE", "value": None,
                        "tags": ["spatial"], "section": 3, "subsection": "Resampling Grids"},
-            "scgrid": {"keyword": "SCGRID:", "describe": "Soil cover grid data file (*.gdf)", "value": None,
+            "scgrid": {"keyword": "SCGRID:", "describe": "Soil cover grid data file (*.gdf), see OPTSOILTYPE", "value": None,
                        "tags": ["spatial"], "section": 3, "subsection": "Resampling Grids"},
 
             # ==================================================================================================
@@ -248,11 +248,11 @@ class Infile:
             "centroidlong": {"keyword": "CENTROIDLONG:", "describe": "Longitude of the watershed centroid, used for solar position calculations (decimal degrees)",
                              "value": None, "tags": ["solar"], "section": 3, "subsection": "Meteorological Variables"},
             "hydrometstations": {"keyword": "HYDROMETSTATIONS:",
-                                 "describe": "Hydrometeorological station file (*.sdf)", "value": None,
+                                 "describe": "Hydrometeorological station file (*.sdf), see METDATAOPTION", "value": None,
                                  "tags": ["meterological"], "section": 3, "subsection": "Meteorological Data"},
-            "hydrometgrid": {"keyword": "HYDROMETGRID:", "describe": "Hydrometeorological grid data file (*.gdf)",
+            "hydrometgrid": {"keyword": "HYDROMETGRID:", "describe": "Hydrometeorological grid data file (*.gdf), see METDATAOPTION",
                              "value": None, "tags": ["meterological"], "section": 3, "subsection": "Meteorological Data"},
-            "gaugestations": {"keyword": "GAUGESTATIONS:", "describe": "Rain Gauge station file (*.sdf)",
+            "gaugestations": {"keyword": "GAUGESTATIONS:", "describe": "Rain Gauge station file (*.sdf), see RAINSOURCE",
                               "value": None, "tags": ["meterological"], "section": 3, "subsection": "Meteorological Data"},
 
             # ==================================================================================================
@@ -275,11 +275,11 @@ class Infile:
             # Module Input Files
             # ==================================================================================================
 
-            "respolygonid": {"keyword": "RESPOLYGONID:", "describe": "Path to file of node IDs representing reservoirs",
+            "respolygonid": {"keyword": "RESPOLYGONID:", "describe": "Path to file of node IDs representing reservoirs, see OPTRESERVOIR",
                              "value": None, "tags": ["hydro"], "section": 3, "subsection": "Module Input Files"},
-            "resdata": {"keyword": "RESDATA:", "describe": "Path to file of elevation-discharge-storage information for each type of reservoir",
+            "resdata": {"keyword": "RESDATA:", "describe": "Path to file of elevation-discharge-storage information for each type of reservoir, see OPTRESERVOIR",
                         "value": None, "tags": ["hydro"], "section": 3, "subsection": "Module Input Files"},
-            "snowfilename": {"keyword": "SNOWFILENAME:", "describe": "Snow parameter reference file (*.spf)",
+            "snowfilename": {"keyword": "SNOWFILENAME:", "describe": "Snow parameter reference file (*.spf), see OPTSNOW",
                              "value": None, "tags": ["meterological"], "section": 3, "subsection": "Module Input Files"},
 
             # ==================================================================================================
