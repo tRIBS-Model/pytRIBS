@@ -36,6 +36,17 @@ The v1.0.0 changes listed below are abbreviated. For specific details refer to t
 * **Legacy Land Use Parameters:** Removed the Gray (1970) interception parameters (`a`, `b1`) from the land use table. ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/34))
 
 ### v0.7.2 (04/02/2026)
+=======
+## Version 0.7.3 (IN PROGRESS)
+This release introduces the support for Python 3.13. The code was tested using a full example model setup but not every pytRIBS function was tested. PLease open an issue if you come across other problems.
+
+#### Changed
+* Remove pynldas2 dependency and add additional dependency imports that were originally included with the pynldas2 package.
+* Remove import of pytz package and replace with python's built in zoneinfo tool.
+* Remove PyVista dependencies and pytRIBS functions that used PyVista. PyVista is a very heavy package and the pytRIBS code that used it were no longer functioning or regularly used.
+* Small chanhes to multiple workflows to handle the shift to Numpy 2.X.
+
+## Version 0.7.2 (04/02/2026)
 This release fixes an issue users on certain versions of Python and introduces GitHub Actions.
 
 #### Added
