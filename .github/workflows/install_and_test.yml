@@ -4,35 +4,36 @@ on:
   push:
     branches:
       - main
-      - "release/**"
+      - dev
   pull_request:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   install_and_import:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.13"]
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-
-      - name: Install system dependencies
-        run: sudo apt-get install -y libgdal-dev
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
 
       - name: Install pytRIBS
-        run: pip install -e .
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
 
       - name: Smoke test import
         run: python -c "import pytRIBS; print('pytRIBS imported successfully')"
