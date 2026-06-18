@@ -622,8 +622,6 @@ class MetProcessor(Aux, InOut):
 
         # Hard coded params for writing
         count = 1
-        num_params_precip = 5
-        num_params_met = 12
 
         # Physical constants
         L = 2.453 * 10 ** 6  # Latent heat of vaporization (J/kg)
@@ -654,15 +652,12 @@ class MetProcessor(Aux, InOut):
                 df = df.loc[orig_begin:orig_end].copy()
 
             # Initialize dictionaries for station details
-            met_sdf = {'station_id': None, 'file_path': None, 'lat_dd': None, 'y': None, 'long_dd': None, 'x': None,
-                       'GMT': None, 'record_length': None, 'num_parameters': None, 'other': None}
-            precip_sdf = {'station_id': None, 'file_path': None, 'y': None, 'x': None, 'record_length': None,
-                          'num_parameters': None, 'elevation': None}
+            met_sdf = {'station_id': None, 'file_path': None, 'y': None, 'x': None, 'elevation': None}
+            precip_sdf = {'station_id': None, 'file_path': None, 'y': None, 'x': None, 'elevation': None}
 
             # Update to tRIBS variables
             df['XC'] = 9999.99
             df['TS'] = 9999.99
-            df['NR'] = 9999.99
             df['psurf'] *= 0.01  # Convert pressure from Pa to hPa
 
             # Calculate Wind Speed
@@ -703,7 +698,7 @@ class MetProcessor(Aux, InOut):
             met_file_path = os.path.join(met_dir, met_file)
 
             self.write_precip_station(df[['R', 'date']].copy(), precip_file_path)
-            self.write_met_station(df[['PA', 'RH', 'XC', 'TS', 'NR', 'TA', 'US', 'VP', 'IS', 'date']].copy(),
+            self.write_met_station(df[['PA', 'RH', 'XC', 'TS', 'TA', 'US', 'IS', 'date']].copy(),
                                     met_file_path)
 
             # Update sdf dictionaries
@@ -712,38 +707,25 @@ class MetProcessor(Aux, InOut):
             met_sdf['file_path'] = met_file_path
             precip_sdf['file_path'] = precip_file_path
 
-            # Geographic coordinates
-            lat = station_coords[count - 1][2]
+            # Geographic coordinates (UTM northing/easting) and elevation
             y = station_coords[count - 1][3]
-            long = station_coords[count - 1][0]
             x = station_coords[count - 1][1]
-
-            met_sdf['lat_dd'] = lat
-            met_sdf['long_dd'] = long
+            elevation = station_coords[count - 1][4]
 
             met_sdf['x'] = x
             met_sdf['y'] = y
             precip_sdf['x'] = x
             precip_sdf['y'] = y
 
-            met_sdf['GMT'] = gmt
-            precip_sdf['elevation'] = station_coords[count - 1][4]
-            met_sdf['other'] = station_coords[count - 1][4]
-
-            met_sdf['num_parameters'] = num_params_met
-            precip_sdf['num_parameters'] = num_params_precip
-
-            length = len(df['date'])
-
-            met_sdf['record_length'] = length
-            precip_sdf['record_length'] = length
+            met_sdf['elevation'] = elevation
+            precip_sdf['elevation'] = elevation
 
             met_sdf_list.append(met_sdf)
             precip_sdf_list.append(precip_sdf)
 
             count += 1
 
-        self.write_met_sdf(met_path, met_sdf_list)
+        self.write_met_sdf(met_sdf_list, met_path)
         self.write_precip_sdf(precip_sdf_list, precip_path)
 
     def run_met_workflow(self, watershed, begin, end, elev=None):
@@ -785,6 +767,11 @@ class MetProcessor(Aux, InOut):
         x, y = watershed.centroid.x, watershed.centroid.y
         centroids = [(x,y)]
 
+        # Store the centroid and UTC offset for tRIBS solar position calculations
+        self.centroidlat['value'] = lat
+        self.centroidlong['value'] = lon
+        self.utcoffset['value'] = gmt
+
         if elev is None:
             print("No elevation provided. Downloading NLDAS-2 elevation grid...")
             ds_elev = self.get_nldas_elevation(watershed, self.meta['EPSG'])
@@ -802,3 +789,66 @@ class MetProcessor(Aux, InOut):
                                                 orig_begin=begin, orig_end=end)
 
         return nldas_df
+
+    # Variable order for the gridded meteorological grid data file (*.gdf). XC (cloud cover) and
+    # TS (surface temperature) are optional; the rest are required (no lookup-table fallback).
+    MET_GRID_ORDER = ['PA', 'RH', 'XC', 'US', 'TA', 'IS', 'TS']
+    MET_GRID_OPTIONAL = ['XC', 'TS']
+
+    def write_met_grid(self, parameters, output_file_path=None):
+        """
+        Writes a gridded meteorological grid data file (*.gdf) and configures the model to use
+        it by setting HYDROMETGRID to the written path and METDATAOPTION to 2 (gridded met).
+
+        Unlike gridded soil/land use, gridded meteorological data has no lookup-table fallback
+        (METDATAOPTION is an exclusive switch), so every required variable must be present in the
+        grid data file. The required variables are PA, RH, US, TA, and IS. XC (cloud cover) and
+        TS (surface temperature) are optional; if not supplied they are written as NO_DATA rows.
+
+        Example
+        -------
+        >>> params = [
+        ...     {'Variable Name': 'PA', 'Raster Path': 'data/weather/PA', 'Raster Extension': 'asc'},
+        ...     {'Variable Name': 'RH', 'Raster Path': 'data/weather/RH', 'Raster Extension': 'asc'},
+        ...     {'Variable Name': 'US', 'Raster Path': 'data/weather/US', 'Raster Extension': 'asc'},
+        ...     {'Variable Name': 'TA', 'Raster Path': 'data/weather/TA', 'Raster Extension': 'asc'},
+        ...     {'Variable Name': 'IS', 'Raster Path': 'data/weather/IS', 'Raster Extension': 'asc'},
+        ... ]
+        >>> met.write_met_grid(params, 'data/weather/hydrometgrid.gdf')
+
+        :param parameters: list of dicts with keys 'Variable Name', 'Raster Path', 'Raster Extension'.
+        :param output_file_path: Path to write the *.gdf to. Defaults to the current
+            HYDROMETGRID option value if one is set.
+        """
+        if output_file_path is None:
+            output_file_path = self.hydrometgrid['value']
+            if output_file_path is None:
+                print("No output path provided and HYDROMETGRID is not set; "
+                      "provide output_file_path.")
+                return
+
+        param_map = {p['Variable Name']: p for p in parameters}
+
+        required = [v for v in self.MET_GRID_ORDER if v not in self.MET_GRID_OPTIONAL]
+        missing_required = [v for v in required if v not in param_map]
+        if missing_required:
+            print(f"Warning: gridded meteorological data has no lookup-table fallback, but these "
+                  f"required variables are missing: {', '.join(missing_required)}.")
+
+        # Emit variables in canonical order, filling optional variables with NO_DATA when absent
+        ordered = []
+        for v in self.MET_GRID_ORDER:
+            if v in param_map:
+                ordered.append(param_map[v])
+            elif v in self.MET_GRID_OPTIONAL:
+                ordered.append({'Variable Name': v, 'Raster Path': 'NO_DATA',
+                                'Raster Extension': 'NO_DATA'})
+        # Append any extra user-provided variables not part of the standard set
+        for p in parameters:
+            if p['Variable Name'] not in self.MET_GRID_ORDER:
+                ordered.append(p)
+
+        self.write_grid_data_file(output_file_path, {'Parameters': ordered})
+
+        self.hydrometgrid['value'] = output_file_path
+        self.metdataoption['value'] = 2

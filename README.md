@@ -22,12 +22,15 @@ The v1.0.0 changes listed below are abbreviated. For specific details refer to t
 
 #### Added
 * **Snow Parameter File (`.spf`):** Snow physics constants can now be read from and written to a dedicated `.spf` file, and are loaded automatically when referenced in the main input file. ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/34))
-* **Root Zone Depth Parameter:** Added the `RZD_m` parameter to the land use table (`.ldt`). ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/XX))
+* **Root Zone Depth Parameter:** Added the `RZD_m` parameter to the land use table (`.ldt`). ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/34))
+* **Simplified Soil Data Table Creation:** Previously if a user had their own soil ID map the process to generate a soil data table (`.sdt`) was cumbersome. A new function, `create_soil_table_from_map()` was added to simplify this process. ([#35](https://github.com/tRIBS-Model/pytRIBS/pull/35))
 
 #### Changed & Refactored
 * **Standardized File Formats:** Reworked the soil (`.sdt`), land use (`.ldt`), and grid data (`.gdf`) readers and writers to the new single-header, comma-delimited v6.0.0 format. ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/34))
 * **Soil Textures:** Soil textures are now written to a `*_textures.csv` sidecar file instead of an extra column in the `.sdt`. ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/34))
 * **Static Land Use Grids:** Grid-file path validation now recognizes the new static gridded land use option (`OPTLANDUSE = 2`). ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/34))
+* **Solar Position Calculations:** Variables for computing the solar position have been moved from the station data files into the main input file as keywords. ([#35](https://github.com/tRIBS-Model/pytRIBS/pull/35))
+* **Forcing Data File Formats:** Reworked the precipitation/meteorological data files (`.sdf` and `.mdf`) readers and writers to the new single-header, comma-delimited v6.0.0 format. ([#35](https://github.com/tRIBS-Model/pytRIBS/pull/35))
   
 #### Removed
 * **Legacy Land Use Parameters:** Removed the Gray (1970) interception parameters (`a`, `b1`) from the land use table. ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/34))

@@ -46,7 +46,7 @@ class ModelProcessor:
             # (1) includes base name and not actual path
             # (2) tRIBS will error out if it doesn't exist, but won't tell you explicitly why.
 
-            if item["key_word"] == "OUTFILENAME:":
+            if item["keyword"] == "OUTFILENAME:":
                 print("Checking OUTFILENAME:")
                 path = item["value"]
                 index = path.rfind('/')  # Find the last occurrence of '/'
@@ -63,7 +63,7 @@ class ModelProcessor:
                 else:
                     print("Warning!!! Path for OUTFILENAME: does not exist")
 
-            if item["value"] is not None:
+            if isinstance(item["value"], str):
                 flag = os.path.exists(item["value"])
                 if flag:
                     exists.append(item)
@@ -72,7 +72,7 @@ class ModelProcessor:
 
         print("\nThe following tRIBS inputs do not have paths that exist: \n")
         for item in doesnt:
-            print(f"{item['key_word']} {item['describe']}")
+            print(f"{item['keyword']} {item['describe']}")
 
         print("\nChecking if station descriptor paths exist.\n")
         rain = instance.read_precip_sdf()

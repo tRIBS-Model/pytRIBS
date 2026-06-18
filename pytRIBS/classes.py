@@ -365,11 +365,12 @@ class Mesh:
         if meta is not None:
             self.meta = meta
 
+        boundary_gdf = None
         if preprocess_args is not None:  # TODO need to catch if generate_mesh_args is NONE
             self.preprocess = Preprocess(*preprocess_args)
             _, bound_path, stream_path, out_path, _ = generate_mesh_args
-            self.preprocess.extract_watershed_and_stream_network(out_path, bound_path,
-                                                                 stream_path)
+            boundary_gdf = self.preprocess.extract_watershed_and_stream_network(out_path, bound_path,
+                                                                                stream_path)
             self.meta = self.preprocess.meta
 
         if generate_mesh_args is not None:
@@ -386,6 +387,15 @@ class Mesh:
         self.optmeshinput = options['optmeshinput']
         self.graphoption = options['graphoption']
         self.demfile = options['demfile']
+
+        # Solar position options auto-populated from the watershed centroid (see update_solar_position)
+        self.utcoffset = options['utcoffset']
+        self.centroidlat = options['centroidlat']
+        self.centroidlong = options['centroidlong']
+
+        # If a watershed was delineated above, auto-populate the solar position keywords from it
+        if boundary_gdf is not None:
+            Aux.update_solar_position(self, boundary_gdf.geometry.iloc[0])
 
 
 class Met(MetProcessor):
@@ -435,5 +445,15 @@ class Met(MetProcessor):
         self.gaugestations = options['gaugestations']
         self.rainfile = options['rainfile']
         self.hydrometgrid = options['hydrometgrid']
+        self.metdataoption = options['metdataoption']
         self.rainsource = options['rainsource']
         self.rainextension = options['rainextension']
+
+        # pytRIBS-internal naming prefix for generated met/precip output files. Not a tRIBS input                                
+        # keyword (so it is not written to the .in file); used by the met workflow.                                              
+        self.hydrometbasename = {'value': None}       
+
+        # Solar position options auto-populated from the watershed centroid (see update_solar_position)
+        self.utcoffset = options['utcoffset']
+        self.centroidlat = options['centroidlat']
+        self.centroidlong = options['centroidlong']

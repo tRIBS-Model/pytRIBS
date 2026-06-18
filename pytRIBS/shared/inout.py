@@ -282,57 +282,73 @@ class InOut:
                     self.snow_options[key]['value'] = lines[i + 1].strip()
             i += 1
 
-    def read_precip_sdf(self, file_path=None):
+    @staticmethod
+    def read_sdf(file_path):
         """
-        Returns list of precip stations, where information from each station is stored in a dictionary.
-        :param file_path: Reads from options["hydrometstations"]["value"], but can be separately specified.
-        :return: List of dictionaries.
+        Reads a tRIBS station descriptor file (*.sdf) and returns a list of station
+        dictionaries. Both the precipitation and hydrometeorological station files share this
+        format: a single descriptive header line that tRIBS skips, followed by comma-delimited
+        rows of ID,DataFile,Northing,Easting,Elevation:
+
+        ID,DataFile,Northing,Easting,Elevation
+        1,data/model/precip/precip_U.mdf,3891469.290931,400109.778323,2188.5
+
+        :param file_path: Path to the *.sdf file.
+        :return: List of dictionaries, one per station, with keys 'station_id', 'file_path',
+            'y' (northing), 'x' (easting), and 'elevation'.
         """
-
-        if file_path is None:
-            file_path = self.options["gaugestations"]["value"]
-
-            if file_path is None:
-                print(self.options["gaugestations"]["key_word"] + "is not specified.")
-                return None
-
         station_list = []
 
         with open(file_path, 'r') as file:
             lines = file.readlines()
 
-        metadata = lines.pop(0)
-        num_stations, num_parameters = map(int, metadata.strip().split())
+        lines.pop(0)  # discard the descriptive header line (skipped by tRIBS)
 
         for l in lines:
-            station_info = l.strip().split()
-            if len(station_info) == 7:
-                station_id, file_path, lat, long, record_length, num_params, elevation = station_info
-                station = {
-                    "station_id": station_id,
-                    "file_path": file_path,
-                    "y": float(lat),
-                    "x": float(long),
-                    "record_length": int(record_length),
-                    "num_parameters": int(num_params),
-                    "elevation": float(elevation)
-                }
-                station_list.append(station)
+            if not l.strip():
+                continue
 
-        if len(station_list) != num_stations:
-            print("Error: Number of stations does not match the specified count.")
+            info = [v.strip() for v in l.strip().split(',')]
+            if len(info) == 5:
+                station_id, data_file, northing, easting, elevation = info
+                station_list.append({
+                    "station_id": station_id,
+                    "file_path": data_file,
+                    "y": float(northing),
+                    "x": float(easting),
+                    "elevation": float(elevation)
+                })
+            else:
+                print(f"Skipping row in {file_path}: expected 5 comma-separated values, "
+                      f"got {len(info)}.")
 
         return station_list
+
+    def read_precip_sdf(self, file_path=None):
+        """
+        Returns list of precip stations read from the *.sdf referenced by the GAUGESTATIONS
+        option (or a separately specified file_path). See read_sdf for the file format.
+        :param file_path: Defaults to options["gaugestations"]["value"].
+        :return: List of dictionaries.
+        """
+        if file_path is None:
+            file_path = self.options["gaugestations"]["value"]
+
+            if file_path is None:
+                print(self.options["gaugestations"]["keyword"] + " is not specified.")
+                return None
+
+        return self.read_sdf(file_path)
 
     @staticmethod
     def read_precip_station(file_path):
         """
         Returns pandas dataframe of precipitation from a station specified by file_path.
-        :param file_path: Flat file with columns Y M D H R
+        :param file_path: tRIBS precip data file (*.mdf), comma-delimited with header Y,M,D,H,R
         :return: Pandas dataframe
         """
         # TODO add var for specifying Station ID
-        df = pd.read_csv(file_path, header=0, sep=r"\s+")
+        df = pd.read_csv(file_path, header=0, sep=',')
         df.rename(columns={'Y': 'year', 'M': 'month', 'D': 'day', 'H': 'hour'}, inplace=True)
         df['date'] = pd.to_datetime(df[['year', 'month', 'day', 'hour']])
         df.drop(['year', 'month', 'day', 'hour'], axis=1, inplace=True)
@@ -340,29 +356,39 @@ class InOut:
         return df
 
     @staticmethod
-    def write_precip_sdf(station_list, output_file_path):
+    def write_sdf(station_list, output_file_path):
         """
-        Writes a list of precip stations to a flat file.
-        :param station_list: List of dictionaries containing station information.
-        :param output_file_path: Output flat file path.
+        Writes a list of station dictionaries to a tRIBS station descriptor file (*.sdf):
+        a single descriptive header line (skipped by tRIBS) followed by comma-delimited rows of
+        ID,DataFile,Northing,Easting,Elevation. Used for both precipitation and
+        hydrometeorological station files.
+
+        :param station_list: List of dictionaries with keys 'station_id', 'file_path',
+            'y' (northing), 'x' (easting), and 'elevation'.
+        :param output_file_path: Output *.sdf path.
         """
         with open(output_file_path, 'w') as file:
-            # Write metadata line
-            metadata = f"{len(station_list)} {len(station_list[0])}\n"
-            file.write(metadata)
-
-            # Write station information
+            file.write("ID,DataFile,Northing,Easting,Elevation\n")
             for station in station_list:
-                line = f"{station['station_id']} {station['file_path']} {station['y']} {station['x']} " \
-                       f"{station['record_length']} {station['num_parameters']} {station['elevation']}\n"
-                file.write(line)
+                file.write(f"{station['station_id']},{station['file_path']},"
+                           f"{station['y']},{station['x']},{station['elevation']}\n")
+
+    @staticmethod
+    def write_precip_sdf(station_list, output_file_path):
+        """
+        Writes a list of precip stations to a *.sdf file. See write_sdf for the file format.
+        :param station_list: List of dictionaries containing station information.
+        :param output_file_path: Output *.sdf path.
+        """
+        InOut.write_sdf(station_list, output_file_path)
 
     @staticmethod
     def write_precip_station(df, output_file_path):
         """
-        Converts a DataFrame with 'date' and 'R' columns to flat file format with columns Y M D H R.
+        Converts a DataFrame with 'date' and 'R' columns to the tRIBS precip data file
+        (*.mdf) format: comma-delimited with header Y,M,D,H,R.
         :param df: Pandas DataFrame with 'date' and 'R' columns.
-        :param output_file_path: Output flat file path.
+        :param output_file_path: Output *.mdf path.
         """
         # Extract Y, M, D, and H from the 'date' column
         df['Y'] = df['date'].dt.year
@@ -374,52 +400,23 @@ class InOut:
         df = df[['Y', 'M', 'D', 'H', 'R']]
 
         # Write DataFrame to flat file
-        df.to_csv(output_file_path, sep=' ', index=False)
+        df.to_csv(output_file_path, sep=',', index=False)
 
     def read_met_sdf(self, file_path=None):
         """
-        Returns list of met stations, where information from each station is stored in a dictionary.
-        :param file_path: Reads from options["hydrometstations"]["value"], but can be separately specified.
+        Returns list of met stations read from the *.sdf referenced by the HYDROMETSTATIONS
+        option (or a separately specified file_path). See read_sdf for the file format.
+        :param file_path: Defaults to options["hydrometstations"]["value"].
         :return: List of dictionaries.
         """
         if file_path is None:
             file_path = self.options["hydrometstations"]["value"]
 
             if file_path is None:
-                print(self.options["hydrometstations"]["key_word"] + "is not specified.")
+                print(self.options["hydrometstations"]["keyword"] + " is not specified.")
                 return None
 
-        station_list = []
-
-        with open(file_path, 'r') as file:
-            lines = file.readlines()
-
-        metadata = lines.pop(0)
-        num_stations, num_parameters = map(int, metadata.strip().split())
-
-        for l in lines:
-            station_info = l.strip().split()
-
-            if len(station_info) == 10:
-                station_id, file_path, lat, y, long, x, gmt, record_length, num_params, other = station_info
-                station = {
-                    "station_id": station_id,
-                    "file_path": file_path,
-                    "lat_dd": float(lat),
-                    "x": float(x),
-                    "long_dd": float(long),
-                    "y": float(y),
-                    "GMT": int(gmt),
-                    "record_length": int(record_length),
-                    "num_parameters": int(num_params),
-                    "other": other
-                }
-                station_list.append(station)
-
-        if len(station_list) != num_stations:
-            print("Error: Number of stations does not match the specified count.")
-
-        return station_list
+        return self.read_sdf(file_path)
 
     @staticmethod
     def read_met_station(file_path):
@@ -429,76 +426,83 @@ class InOut:
         Parameters
         ----------
         file_path : str
-            Path to the meteorological station data file. The file should be in a space-separated format with columns for
-            year, month, day, and hour.
+            Path to the *.mdf file. The file is comma-delimited with the header
+            Year,Month,Day,Hour,PA_mb,RH_pct,XC_tenths,US_m/s,TA_C,IS_W/m2,TS_C.
 
         Returns
         -------
         pandas.DataFrame
-            A DataFrame containing the meteorological data with a single 'date' column as a datetime index, and the remaining
-            columns from the input file.
+            A DataFrame with a single 'date' column built from Year/Month/Day/Hour, and the
+            meteorological variables under their short names: PA, RH, XC, US, TA, IS, TS.
 
         Notes
         -----
-        - The function expects the input file to have columns 'Y', 'M', 'D', and 'H' for year, month, day, and hour, respectively.
-        - The columns for year, month, day, and hour are converted into a single 'date' column of datetime type.
-        - The original columns 'Y', 'M', 'D', and 'H' are dropped from the DataFrame after the datetime conversion.
+        - The descriptive, unit-bearing header columns are mapped to the short variable names.
+        - Year/Month/Day/Hour are combined into a single 'date' column and dropped.
         """
-        # TODO add var for specifying Station ID and doc
-        df = pd.read_csv(file_path, header=0, sep=r'\s+')
-        # convert year, month, day to datetime and drop columns
-        df.rename(columns={'Y': 'year', 'M': 'month', 'D': 'day', 'H': 'hour'}, inplace=True)
+        df = pd.read_csv(file_path, header=0, sep=',')
+        df.rename(columns={'Year': 'year', 'Month': 'month', 'Day': 'day', 'Hour': 'hour',
+                           'PA_mb': 'PA', 'RH_pct': 'RH', 'XC_tenths': 'XC', 'US_m/s': 'US',
+                           'TA_C': 'TA', 'IS_W/m2': 'IS', 'TS_C': 'TS'}, inplace=True)
         df['date'] = pd.to_datetime(df[['year', 'month', 'day', 'hour']])
         df = df.drop(['year', 'month', 'day', 'hour'], axis=1)
         return df
+
     @staticmethod
     def write_met_station(df, output_file_path):
         """
-        Converts a DataFrame with 'date' and 'PA','TD' or 'RH' or 'VP','XC','US','TA','TS','NR' columns to flat file format.
-        See tRIBS documentation for more details on weather station data structure (i.e. *mdf files).
-        :param df: Pandas DataFrame with 'date' and 'R' columns.
-        :param output_file_path: Output flat file path.
+        Converts a DataFrame with a 'date' column and meteorological variables to the tRIBS 
+         meteorological data file (*.mdf) format: comma-delimited with the header
+        Year,Month,Day,Hour,PA_mb,RH_pct,XC_tenths,US_m/s,TA_C,IS_W/m2,TS_C.
+
+        Relative humidity (RH) is the only accepted humidity input in v6.0.0; the pre-v6.0.0
+        TD/VP alternatives and the unused net radiation (NR) column have been removed. Cloud
+        cover (XC) and surface temperature (TS) are required columns but are typically 9999.99;
+        if absent from df they are written as 9999.99.
+
+        :param df: Pandas DataFrame with a 'date' column and at least 'PA', 'RH', 'US', 'TA',
+            and 'IS' columns.
+        :param output_file_path: Output *.mdf path.
         """
-        # Extract Y, M, D, and H from the 'date' column
-        df['Y'] = df['date'].dt.year
-        df['M'] = df['date'].dt.month
-        df['D'] = df['date'].dt.day
-        df['H'] = df['date'].dt.hour
+        if 'RH' not in df.columns:
+            print("Error: 'RH' (relative humidity) is required for the met data file.")
+            return
 
-        # Format 'D' and 'H' columns with zero-padding
-        df['D'] = df['D'].apply(lambda x: str(x).zfill(2))
-        df['H'] = df['H'].apply(lambda x: str(x).zfill(2))
+        df = df.copy()
 
-        # Check which column ('TD', 'RH', or 'VP') is present in the DataFrame
-        present_column = next((col for col in ['TD', 'RH', 'VP'] if col in df.columns), None)
+        # Extract Year, Month, Day, Hour from the 'date' column
+        df['Year'] = df['date'].dt.year
+        df['Month'] = df['date'].dt.month
+        df['Day'] = df['date'].dt.day
+        df['Hour'] = df['date'].dt.hour
 
-        if present_column is not None:
-            # Reorder columns
-            df = df[['Y', 'M', 'D', 'H', 'PA', present_column, 'XC', 'US', 'TA', 'IS', 'TS', 'NR']]
+        # XC and TS are required columns but are typically the 9999.99 fill value
+        if 'XC' not in df.columns:
+            df['XC'] = 9999.99
+        if 'TS' not in df.columns:
+            df['TS'] = 9999.99
 
-            # Write DataFrame to flat file with tab as separator
-            df.to_csv(output_file_path, sep='\t', index=False)
-        else:
-            print("Error: One of 'TD', 'RH', or 'VP' column must be present in the DataFrame.")
+        columns = ['Year', 'Month', 'Day', 'Hour', 'PA', 'RH', 'XC', 'US', 'TA', 'IS', 'TS']
+        header = 'Year,Month,Day,Hour,PA_mb,RH_pct,XC_tenths,US_m/s,TA_C,IS_W/m2,TS_C'
+
+        with open(output_file_path, 'w') as f:
+            f.write(header + '\n')
+            df[columns].to_csv(f, header=False, index=False)
 
 
     @staticmethod
-    def write_met_sdf(output_file_path, station_list):
+    def write_met_sdf(station_list, output_file_path):
         """
-        Writes a list of meteorological stations to a flat file (i.e. *.sdf file).
-        :param station_list: List of dictionaries containing station information.
-        :param output_file_path: Output flat file path.
-        """
-        with open(output_file_path, 'w') as file:
-            # Write metadata line
-            metadata = f"{len(station_list)} {len(station_list[0])}\n"
-            file.write(metadata)
+        Writes a list of meteorological stations to a *.sdf file. See write_sdf for the file
+        format.
 
-            # Write station information
-            for station in station_list:
-                line = f"{station['station_id']} {station['file_path']} {station['lat_dd']} {station['y']} {station['long_dd']} {station['x']} " \
-                       f"{station['GMT']} {station['record_length']} {station['num_parameters']} {station['other']}\n"
-                file.write(line)
+        Note: the argument order changed in v1.0.0 to (station_list, output_file_path) to match
+        write_precip_sdf.
+
+        :param station_list: List of dictionaries containing station information.
+        :param output_file_path: Output *.sdf path.
+        """
+        InOut.write_sdf(station_list, output_file_path)
 
     def read_landuse_table(self, file_path=None):
         """
@@ -518,7 +522,7 @@ class InOut:
             file_path = self.landtablename["value"]
 
             if file_path is None:
-                print(self.landtablename["key_word"] + "is not specified.")
+                print(self.landtablename["keyword"] + " is not specified.")
                 return
 
         landuse_list = []
@@ -557,6 +561,12 @@ class InOut:
             else:
                 print(f"Skipping row in {file_path}: expected {param_standard} comma-separated "
                       f"values, got {len(land_info)}.")
+
+        if not landuse_list:
+            print(f"Warning: no land use entries were read from {file_path}. Confirm it is in the "
+                  f"tRIBS format (one descriptive header line, then comma-delimited rows). "
+                  f"Pre-v6.0.0 tables (a count line with whitespace-delimited rows) are not "
+                  f"compatible and must be converted.")
 
         return landuse_list
     @staticmethod

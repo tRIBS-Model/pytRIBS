@@ -592,13 +592,15 @@ class Preprocess:
         outlet = self.create_outlet(self.outlet[0], self.outlet[1], flow_acc, self.snap_distance,
                                     output_path=f'{outlet_path}')
         ws_mask = self.generate_watershed_mask(d8_raster, outlet)
-        _, ws_bound = self.generate_watershed_boundary(ws_mask, output_path=f'{boundary_path}')
+        ws_gdf, ws_bound = self.generate_watershed_boundary(ws_mask, output_path=f'{boundary_path}')
         stream_shp = self.convert_stream_raster_to_vector(streams, d8_raster)
         self.clip_rasters([filled], ws_bound, output_dir=output_dir, method='both')
         self.clip_streamline(os.path.abspath(stream_shp), ws_bound, output_path=f'{output_streams_path}')
 
         if clean is True:
             shutil.rmtree(temp)
+
+        return ws_gdf
 
 
 class GenerateMesh:

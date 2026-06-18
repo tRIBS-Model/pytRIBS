@@ -171,7 +171,7 @@ class SoilProcessor:
             file_path = self.soiltablename["value"]
 
             if file_path is None:
-                print(self.soiltablename["key_word"] + "is not specified.")
+                print(self.soiltablename["keyword"] + " is not specified.")
                 return None
 
         soil_list = []
@@ -208,6 +208,12 @@ class SoilProcessor:
             else:
                 print(f"Skipping row in {file_path}: expected {param_standard} comma-separated "
                       f"values, got {len(soil_info)}.")
+
+        if not soil_list:
+            print(f"Warning: no soil entries were read from {file_path}. Confirm it is in the tRIBS "
+                  f"correct format (one descriptive header line, then comma-delimited rows). "
+                  f"Pre-v6.0.0 tables (a count line with whitespace-delimited rows) are not "
+                  f"compatible and must be converted.")
 
         if textures:
             texture_file = f"{os.path.splitext(file_path)[0]}_textures.csv"
@@ -286,6 +292,68 @@ class SoilProcessor:
                     file.write(f"{type['ID']},{type['Texture']}\n")
             print(f"Soil texture reference written to {texture_file}. This file is for user "
                   f"reference only and is not read by tRIBS.")
+
+    def create_soil_table_from_map(self, soil_map=None, textures=None):
+        """
+        Builds a soil reclassification table scaffold from an existing soil ID map (raster).
+
+        Reads the soil map, extracts the unique class IDs, and returns a list of dictionaries
+        (one per class) with the 'ID' set and every soil parameter left as None for the user to
+        fill in. This is the counterpart to create_soil_map (which derives both a map and a table
+        from gridded sand/clay data); use this when you already have a classified soil ID map and
+        just need a table to populate.
+
+        Parameters
+        ----------
+        soil_map : str, optional
+            Path to the soil ID map raster. Defaults to self.soilmapname['value'].
+        textures : dict, optional
+            Optional mapping of class ID (as a string) to a texture label. When provided, each
+            class dictionary gets a 'Texture' entry (None if its ID is not in the mapping). Those
+            labels are written to the soils_textures.csv sidecar by write_soil_table(textures=True).
+
+        Returns
+        -------
+        list of dict or None
+            One dictionary per soil class with 'ID' and the soil parameters (Ks, thetaS, thetaR,
+            m, PsiB, f, As, Au, n, ks, Cs) initialized to None, plus 'Texture' if a textures
+            mapping was provided. Returns None if no soil map is available.
+
+        Examples
+        --------
+        >>> soil.soilmapname['value'] = 'soil_classes.soi'
+        >>> soil_table = soil.create_soil_table_from_map(textures={'1': 'sandy_loam'})
+        >>> for cls in soil_table:
+        ...     cls['Ks'] = 3.6  # fill in parameters per class
+        >>> soil.write_soil_table(soil_table, soil.soiltablename['value'], textures=True)
+        """
+        if soil_map is None:
+            soil_map = self.soilmapname['value']
+            if soil_map is None:
+                print(self.soilmapname['keyword'] + " is not specified.")
+                return None
+
+        raster = self._read_ascii(soil_map)
+        nodata = raster['profile'].get('nodata')
+
+        ids = np.unique(raster['data'])
+        if nodata is not None:
+            ids = ids[ids != nodata]
+        ids = ids[np.isfinite(ids.astype(float))]  # drop NaN/inf
+
+        params = ['Ks', 'thetaS', 'thetaR', 'm', 'PsiB', 'f', 'As', 'Au', 'n', 'ks', 'Cs']
+
+        soil_table = []
+        for i in ids:
+            cid = str(int(i))
+            cls = {'ID': cid}
+            for p in params:
+                cls[p] = None
+            if textures is not None:
+                cls['Texture'] = textures.get(cid)
+            soil_table.append(cls)
+
+        return soil_table
 
     def get_soil_grids(self, bbox, depths, soil_vars, stats, replace=False):
         def retrieve_soil_data(self, bbox, depths, soil_vars, stats):

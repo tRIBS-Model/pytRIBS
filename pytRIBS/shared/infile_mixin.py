@@ -57,6 +57,13 @@ class Infile:
             "rainsearch": {"keyword": "RAINSEARCH:", "describe": "Rainfall search interval (hours)", "value": 24,
                            "tags": ["time"], "section": 1, "subsection": "Time Variables"},
 
+            "utcoffset": {"keyword": "UTCOFFSET:", "describe": "UTC (GMT) offset of the watershed centroid, used for solar position calculations (hours)",
+                          "value": None, "tags": ["time"], "section": 1, "subsection": "Solar Position Variables"},
+            "centroidlat": {"keyword": "CENTROIDLAT:", "describe": "Latitude of the watershed centroid, used for solar position calculations (decimal degrees)",
+                            "value": None, "tags": ["solar"], "section": 1, "subsection": "Solar Position Variables"},
+            "centroidlong": {"keyword": "CENTROIDLONG:", "describe": "Longitude of the watershed centroid, used for solar position calculations (decimal degrees)",
+                             "value": None, "tags": ["solar"], "section": 1, "subsection": "Solar Position Variables"},
+
             # ==================================================================================================
             # ROUTING PARAMETERS
             # ==================================================================================================
