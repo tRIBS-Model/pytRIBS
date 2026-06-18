@@ -23,7 +23,6 @@ class Infile:
         spatial   - input raster files and tables for bedrock, groundwater, landuse, and soil properties.
         meterological    -  options for meterological data
         output    - options and paths for model outputs
-        forecast - suite of options for forecast mode
         restart   - options for restart functionality
         parallel  - options for parallel functionality
 
@@ -56,13 +55,6 @@ class Infile:
                             "tags": ["time"], "section": 1, "subsection": "Time Variables"},
             "rainsearch": {"keyword": "RAINSEARCH:", "describe": "Rainfall search interval (hours)", "value": 24,
                            "tags": ["time"], "section": 1, "subsection": "Time Variables"},
-
-            "utcoffset": {"keyword": "UTCOFFSET:", "describe": "UTC (GMT) offset of the watershed centroid, used for solar position calculations (hours)",
-                          "value": None, "tags": ["time"], "section": 1, "subsection": "Solar Position Variables"},
-            "centroidlat": {"keyword": "CENTROIDLAT:", "describe": "Latitude of the watershed centroid, used for solar position calculations (decimal degrees)",
-                            "value": None, "tags": ["solar"], "section": 1, "subsection": "Solar Position Variables"},
-            "centroidlong": {"keyword": "CENTROIDLONG:", "describe": "Longitude of the watershed centroid, used for solar position calculations (decimal degrees)",
-                             "value": None, "tags": ["solar"], "section": 1, "subsection": "Solar Position Variables"},
 
             # ==================================================================================================
             # ROUTING PARAMETERS
@@ -228,6 +220,8 @@ class Infile:
                          "tags": ["meterological"], "section": 3, "subsection": "Resampling Grids"},
             "rainextension": {"keyword": "RAINEXTENSION:", "describe": "Extension for the radar ASCII grid",
                               "value": None, "tags": ["meterological"], "section": 3, "subsection": "Resampling Grids"},
+            "raindistribution": {"keyword": "RAINDISTRIBUTION:", "describe": "Precipitation distributed as provided or mean areal precipitation",
+                                 "value": 0, "tags": ["meterological"], "section": 3, "subsection": "Resampling Grids"},
             "depthtobedrock": {"keyword": "DEPTHTOBEDROCK:", "describe": "Uniform depth to bedrock (meters), see OPTBEDROCK",
                                "value": 15, "tags": ["hydro"], "section": 3, "subsection": "Resampling Grids"},
             "bedrockfile": {"keyword": "BEDROCKFILE:", "describe": "Bedrock depth ASCII grid (*.brd), see OPTBEDROCK",
@@ -247,6 +241,12 @@ class Infile:
                           "tags": ["meterological"], "section": 3, "subsection": "Meteorological Variables"},
             "preclapse": {"keyword": "PRECLAPSE:", "describe": "Precipitation lapse rate", "value": 0,
                           "tags": ["meterological"], "section": 3, "subsection": "Meteorological Variables"},
+            "utcoffset": {"keyword": "UTCOFFSET:", "describe": "UTC (GMT) offset of the watershed centroid, used for solar position calculations (hours)",
+                          "value": None, "tags": ["time"], "section": 3, "subsection": "Meteorological Variables"},
+            "centroidlat": {"keyword": "CENTROIDLAT:", "describe": "Latitude of the watershed centroid, used for solar position calculations (decimal degrees)",
+                            "value": None, "tags": ["solar"], "section": 3, "subsection": "Meteorological Variables"},
+            "centroidlong": {"keyword": "CENTROIDLONG:", "describe": "Longitude of the watershed centroid, used for solar position calculations (decimal degrees)",
+                             "value": None, "tags": ["solar"], "section": 3, "subsection": "Meteorological Variables"},
             "hydrometstations": {"keyword": "HYDROMETSTATIONS:",
                                  "describe": "Hydrometeorological station file (*.sdf)", "value": None,
                                  "tags": ["meterological"], "section": 3, "subsection": "Meteorological Data"},
@@ -283,36 +283,23 @@ class Infile:
                         "value": None, "tags": ["hydro"], "section": 3, "subsection": "Module Input Files"},
             "snowfilename": {"keyword": "SNOWFILENAME:", "describe": "Snow parameter reference file (*.spf)",
                              "value": None, "tags": ["meterological"], "section": 3, "subsection": "Module Input Files"},
-            "channelconductivity": {"keyword": "CHANNELCONDUCTIVITY:", "describe": "Conductivity in channel for all methods (mm/hr)",
-                                    "value": 0, "tags": ["hydro"], "section": 3, "subsection": "Module Input Files"},
-            "transientconductivity": {"keyword": "TRANSIENTCONDUCTIVITY:", "describe": "Conductivity in channel during transient period in (mm/hr)",
-                                      "value": 0, "tags": ["hydro"], "section": 3, "subsection": "Module Input Files"},
-            "transienttime": {"keyword": "TRANSIENTTIME:", "describe": "Time until transient period ends (hours)", "value": 0,
-                              "tags": ["hydro"], "section": 3, "subsection": "Module Input Files"},
-            "channelporosity": {"keyword": "CHANNELPOROSITY:", "describe": "Porosity in channel", "value": 0,
-                                "tags": ["hydro"], "section": 3, "subsection": "Module Input Files"},
-            "chanporeindex": {"keyword": "CHANPOREINDEX:", "describe": "Channel pore index in channel", "value": 0,
-                              "tags": ["hydro"], "section": 3, "subsection": "Module Input Files"},
-            "chanpsib": {"keyword": "CHANPSIB:", "describe": "Matric potential in channel", "value": 0,
-                         "tags": ["hydro"], "section": 3, "subsection": "Module Input Files"},
 
             # ==================================================================================================
-            # FORECAST MODE
+            # CHANNEL TRANSMISSION LOSSES
             # ==================================================================================================
-            "forecastmode": {"keyword": "FORECASTMODE:", "describe": "Rainfall Forecasting Mode Option", "value": 0,
-                             "tags": ["forecast"], "section": 4, "subsection": "Rainfall Forecasting"},
-            "forecasttime": {"keyword": "FORECASTTIME:", "describe": "Forecast Time (hours from start)", "value": 0,
-                             "tags": ["forecast"], "section": 4, "subsection": "Rainfall Forecasting"},
-            "forecastleadtime": {"keyword": "FORECASTLEADTIME:", "describe": "Forecast Lead Time (hours) ",
-                                 "value": 0, "tags": ["forecast"], "section": 4, "subsection": "Rainfall Forecasting"},
-            "forecastlength": {"keyword": "FORECASTLENGTH:", "describe": "Forecast Window Length (hours)", "value": 0,
-                               "tags": ["forecast"], "section": 4, "subsection": "Rainfall Forecasting"},
-            "forecastfile": {"keyword": "FORECASTFILE:", "describe": "Base name of the radar QPF grids",
-                             "value": None, "tags": ["forecast"], "section": 4, "subsection": "Rainfall Forecasting"},
-            "climatology": {"keyword": "CLIMATOLOGY:", "describe": "Rainfall climatology (mm/hr)", "value": 0,
-                            "tags": ["forecast"], "section": 4, "subsection": "Rainfall Forecasting"},
-            "raindistribution": {"keyword": "RAINDISTRIBUTION:", "describe": "Distributed or MAP radar rainfall",
-                                 "value": 0, "tags": ["forecast"], "section": 4, "subsection": "Rainfall Forecasting"},
+
+            "channelconductivity": {"keyword": "CHANNELCONDUCTIVITY:", "describe": "Conductivity in channel for all methods (mm/hr)",
+                                    "value": 0, "tags": ["hydro"], "section": 4, "subsection": "Channel Transmission Losses"},
+            "transientconductivity": {"keyword": "TRANSIENTCONDUCTIVITY:", "describe": "Conductivity in channel during transient period in (mm/hr)",
+                                      "value": 0, "tags": ["hydro"], "section": 4, "subsection": "Channel Transmission Losses"},
+            "transienttime": {"keyword": "TRANSIENTTIME:", "describe": "Time until transient period ends (hours)", "value": 0,
+                              "tags": ["hydro"], "section": 4, "subsection": "Channel Transmission Losses"},
+            "channelporosity": {"keyword": "CHANNELPOROSITY:", "describe": "Porosity in channel", "value": 0,
+                                "tags": ["hydro"], "section": 4, "subsection": "Channel Transmission Losses"},
+            "chanporeindex": {"keyword": "CHANPOREINDEX:", "describe": "Channel pore index in channel", "value": 0,
+                              "tags": ["hydro"], "section": 4, "subsection": "Channel Transmission Losses"},
+            "chanpsib": {"keyword": "CHANPSIB:", "describe": "Matric potential in channel", "value": 0,
+                         "tags": ["hydro"], "section": 4, "subsection": "Channel Transmission Losses"},
 
             # ==================================================================================================
             # RESTART MODE
