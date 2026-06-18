@@ -259,10 +259,8 @@ class Infile:
             # OUTPUT DATA
             # ==================================================================================================
 
-            "outfilename": {"keyword": "OUTFILENAME:", "describe": "Base name of the tMesh and variable",
+            "outfilename": {"keyword": "OUTFILENAME:", "describe": "Filepath and base name of model outputs",
                             "value": None, "tags": ["output"], "section": 3, "subsection": "Output Data"},
-            "outhydrofilename": {"keyword": "OUTHYDROFILENAME:", "describe": "Base name for hydrograph output",
-                                 "value": None, "tags": ["output"], "section": 3, "subsection": "Output Data"},
             "nodeoutputlist": {"keyword": "NODEOUTPUTLIST:",
                                "describe": "Filename with Nodes for Dynamic Output (*.nol)", "value": None,
                                "tags": ["output"], "section": 3, "subsection": "Output Data"},

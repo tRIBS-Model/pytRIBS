@@ -16,7 +16,7 @@ class Read():
         This method reads a `.qout` file containing outlet discharge and water level data, parses it into a DataFrame, and converts
         the time information from hours since the start date to actual timestamps.
 
-        The `.qout` file is expected to be named by appending `'_Outlet.qout'` to the value of the `"outhydrofilename"` option
+        The `.qout` file is expected to be named by appending `'_Outlet.qout'` to the value of the `"outfilename"` option
         from the `self.options` dictionary.
 
         The method performs the following steps:
@@ -34,7 +34,7 @@ class Read():
             - `Time` is the converted timestamp corresponding to each time step.
         """
         # currently only read for outlet, neet to add for hydronodelist
-        qout_file = self.options["outhydrofilename"]["value"]+'_Outlet.qout'
+        qout_file = self.options["outfilename"]["value"]+'_Outlet.qout'
         qout_df = pd.read_csv(qout_file, header=None, names=['Time_hr', 'Qstrm_m3s', 'Hlev_m'], skiprows=1, sep='\t')
 
         starting_date = self.options["startdate"]["value"]
@@ -46,7 +46,7 @@ class Read():
         """
         Reads and processes the `.mrf` file containing model results.
 
-        If `mrf_file` is not provided, constructs the filename using the value of the `"outhydrofilename"` option
+        If `mrf_file` is not provided, constructs the filename using the value of the `"outfilename"` option
         from `self.options`, combined with the runtime value, and appends `"_00.mrf"` to it.
 
         This method performs the following steps:
@@ -59,7 +59,7 @@ class Read():
         Parameters
         ----------
         mrf_file : str, optional
-            The path to the `.mrf` file. If not provided, the filename is constructed based on the `"outhydrofilename"` and `"runtime"`
+            The path to the `.mrf` file. If not provided, the filename is constructed based on the `"outfilename"` and `"runtime"`
             options from `self.options`.
 
         Returns
@@ -73,7 +73,7 @@ class Read():
             while len(runtime) < 4:
                 runtime = '0' + runtime
 
-            mrf_file = self.options["outhydrofilename"]["value"] + runtime + "_00.mrf"
+            mrf_file = self.options["outfilename"]["value"] + runtime + "_00.mrf"
 
         # Read the first two rows to get column names and units
         with open(mrf_file, 'r') as file:
