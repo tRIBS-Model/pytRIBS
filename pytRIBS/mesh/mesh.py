@@ -2196,7 +2196,7 @@ class MeshProcessor:
 
         Parameters
         ----------
-        method : {'pslg', 'points'}, optional
+        method : {'pslg', 'points', 'station'}, optional
             Mesh-generation strategy. Default ``'pslg'``.
 
             - ``'pslg'`` (primary): build a planar straight-line graph (buffered
@@ -2207,6 +2207,9 @@ class MeshProcessor:
             - ``'points'`` (legacy): select significant terrain points and write a
               ``.points`` file for tRIBS/meshbuilder to triangulate. See
               :meth:`generate_points_mesh`.
+            - ``'station'``: build a minimal single-polygon mesh for a point/station
+              model — one central stream node ringed by closed boundary nodes with a
+              single downslope outlet. See :meth:`generate_station_mesh`.
         **kwargs
             Forwarded to the selected method.
 
@@ -2214,13 +2217,15 @@ class MeshProcessor:
         -------
         object
             The :class:`MeshFromPSLG` instance (``'pslg'``) or the points
-            GeoDataFrame (``'points'``).
+            GeoDataFrame (``'points'`` / ``'station'``).
         """
         if method == 'pslg':
             return self.generate_pslg_mesh(**kwargs)
         if method == 'points':
             return self.generate_points_mesh(**kwargs)
-        raise ValueError(f"Unknown mesh method '{method}'. Use 'pslg' or 'points'.")
+        if method == 'station':
+            return self.generate_station_mesh(**kwargs)
+        raise ValueError(f"Unknown mesh method '{method}'. Use 'pslg', 'points', or 'station'.")
 
     def generate_pslg_mesh(self, threshold=None, interior_points=None,
                            output_prefix=None, output_path=None, write_files=True,
@@ -2375,3 +2380,224 @@ class MeshProcessor:
         # Expose the buffered watershed (used by downstream met/forcing workflows).
         self.buffered_watershed = buffered_watershed
         return gdf
+
+    # Minimum drainage slope for a station mesh; a flat (zero-gradient) flow edge
+    # stalls kinematic routing, so the realised slope is floored at this value.
+    MIN_STATION_SLOPE_DEG = 0.5
+
+    # Default station Voronoi cell area (m^2) when the user specifies neither radius
+    # nor area: ~100 m^2, i.e. a standard 10 m grid cell
+    DEFAULT_STATION_AREA = 100.0
+
+    # Default footprint (m) over which slope/aspect are derived from the DEM. Decoupled
+    # from the (cosmetic) cell size so a small cell does not yield a noisy, too-local
+    # gradient. ~50 m is good enough for a representative hillslope scale.
+    DEFAULT_TERRAIN_RADIUS = 50.0
+
+    def generate_station_mesh(self, station_xy, station_elev=None, slope=None, aspect=None,
+                              radius=None, area=None, terrain_radius=None, dem_file=None,
+                              n_boundary=8, min_slope=MIN_STATION_SLOPE_DEG, output_file=None):
+        """
+        Build a minimal single-polygon (point/station) mesh and write a ``.points`` file.
+
+        Produces one central stream node (``bc`` = 3) ringed by ``n_boundary`` evenly
+        spaced closed boundary nodes (``bc`` = 1), with a single open outlet
+        (``bc`` = 2) placed in the downslope (aspect) direction. tRIBS triangulates
+        the points itself (``OPTMESHINPUT`` = 2).
+
+        For a single interior node only two elevations affect the physics: the centre
+        Z (the station elevation, which also drives the met lapse-rate correction) and
+        the outlet Z, whose difference over the centre→outlet distance sets the one
+        flow-edge slope feeding the radiation/ET surface slope and the kinematic
+        hydraulic gradient. Voronoi cell area comes from the ring geometry and aspect
+        from the outlet azimuth — so no terrain surface is needed. The closed ring
+        nodes are inert and are placed at the centre elevation.
+
+        Slope and aspect are taken from ``dem_file`` when provided (the typical case —
+        derived from a least-squares plane fit over ``terrain_radius``, a hillslope-scale
+        footprint decoupled from the cell size so the gradient reflects the hillslope
+        rather than the DEM pixel); otherwise pass them directly.
+
+        Parameters
+        ----------
+        station_xy : tuple of float
+            (x, y) coordinate of the station / central node.
+        station_elev : float, optional
+            Centre-node elevation. Sampled from ``dem_file`` if not given; required if
+            no DEM is provided.
+        slope : float, optional
+            Drainage slope in **degrees**. Derived from ``dem_file`` if not given;
+            otherwise defaults to ``min_slope`` (with a warning). Floored at
+            ``min_slope`` so routing does not stall.
+        aspect : float, optional
+            Outlet azimuth in **degrees** clockwise from north. Derived from
+            ``dem_file`` if not given; otherwise defaults to 180° (with a warning).
+        radius : float, optional
+            Ring radius (m), i.e. the centre→outlet distance. If neither ``radius`` nor
+            ``area`` is given, defaults to a ~100 m² cell (see ``area``).
+        area : float, optional
+            Target Voronoi cell area (m²) for the centre node, converted to the ring
+            radius that yields it. Takes precedence over ``radius``. When neither is
+            specified, defaults to 100 m² (≈ a 10 m grid cell, matching the standard
+            single-station template).
+        terrain_radius : float, optional
+            Footprint (m) over which slope/aspect are derived from ``dem_file``,
+            decoupled from the cell size. Defaults to ``max(50 m, ring radius)`` so the
+            gradient is read at a hillslope scale even for a small cell. Has no effect
+            when slope/aspect are supplied directly.
+        dem_file : str, optional
+            DEM used to derive any unspecified ``station_elev`` / ``slope`` / ``aspect``.
+        n_boundary : int, optional
+            Number of ring nodes. Default 8. (Cosmetic for a single-cell model; only
+            even angular spacing matters.)
+        min_slope : float, optional
+            Minimum drainage slope in degrees. Default 0.5.
+        output_file : str, optional
+            Path for the ``.points`` file. Defaults to ``'{Name}.points'`` inside the
+            Mesh instance's ``mesh_dir``, or the current working directory.
+
+        Returns
+        -------
+        geopandas.GeoDataFrame
+            The station nodes written to the points file.
+        """
+        cx, cy = float(station_xy[0]), float(station_xy[1])
+
+        # Cell size: the centre node's Voronoi cell is a regular n-gon with apothem
+        # R/2, so area = n*(R/2)^2*tan(pi/n). Default to a representative ~100 m^2 cell
+        # so users need not pick a size; an explicit ``area`` (preferred) or ``radius``
+        # overrides it. Resolve to a radius first so DEM slope/aspect can be derived at
+        # the cell scale.
+        if radius is None and area is None:
+            area = self.DEFAULT_STATION_AREA
+        if area is not None:
+            radius = 2.0 * np.sqrt(area / (n_boundary * np.tan(np.pi / n_boundary)))
+
+        # Slope/aspect footprint is decoupled from the (cosmetic) cell size: default to
+        # a hillslope scale, but never smaller than the cell itself.
+        if terrain_radius is None:
+            terrain_radius = max(self.DEFAULT_TERRAIN_RADIUS, radius)
+
+        # DEM is the primary source for the physical inputs: derive any unspecified
+        # elevation / slope / aspect from the DEM over the terrain footprint, so
+        # fine-resolution micro-topography doesn't dominate the gradient.
+        if dem_file is not None:
+            dem_elev, dem_slope, dem_aspect = self._dem_terrain(dem_file, cx, cy, terrain_radius)
+            if station_elev is None:
+                station_elev = dem_elev
+            if slope is None:
+                slope = dem_slope
+            if aspect is None:
+                aspect = dem_aspect
+
+        if station_elev is None:
+            raise ValueError("station_elev is required when no dem_file is provided.")
+        if aspect is None:
+            aspect = 180.0
+            print("  WARNING: no aspect provided or derived; defaulting outlet to due south (180°).")
+        if slope is None:
+            slope = min_slope
+            print(f"  WARNING: no slope provided or derived; defaulting to {min_slope}° "
+                  f"so kinematic routing does not stall.")
+
+        # Guardrail: a flat flow edge stalls routing — floor the slope.
+        if slope < min_slope:
+            print(f"  WARNING: slope {slope:.3f}° below minimum {min_slope}°; raising to {min_slope}°.")
+            slope = min_slope
+
+        # Ring: outlet placed exactly at the aspect azimuth, the rest evenly spaced.
+        # Azimuth is clockwise from north: 0° -> +y (north), 90° -> +x (east).
+        az = aspect + np.arange(n_boundary) * (360.0 / n_boundary)
+        az_rad = np.radians(az)
+        ring_x = cx + radius * np.sin(az_rad)
+        ring_y = cy + radius * np.cos(az_rad)
+
+        # Realised slope uses the actual placed radius (centre->outlet distance).
+        outlet_z = station_elev - np.tan(np.radians(slope)) * radius
+
+        # Centre stream node, then ring nodes (index 1 = the aspect-aligned outlet).
+        xs = [cx] + list(ring_x)
+        ys = [cy] + list(ring_y)
+        zs = [station_elev] + [station_elev] * n_boundary
+        bcs = [3] + [1] * n_boundary
+        zs[1] = outlet_z
+        bcs[1] = 2
+
+        crs = f"EPSG:{self.meta['EPSG']}" if self.meta.get('EPSG') else None
+        gdf = gpd.GeoDataFrame(
+            {'elevation': zs, 'bc': bcs},
+            geometry=[Point(x, y) for x, y in zip(xs, ys)],
+            crs=crs,
+        )
+
+        if output_file is None:
+            out_dir = getattr(self, 'mesh_dir', None) or ''
+            output_file = os.path.join(out_dir, f"{self.meta.get('Name') or 'station'}.points")
+        parent = os.path.dirname(output_file)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        InOut.write_point_file(gdf, output_file)
+
+        # Point the model at the points file: OPTMESHINPUT 2 (Point Triangulator).
+        self.pointfilename['value'] = output_file
+        self.optmeshinput['value'] = 2
+
+        print(f"  Station mesh: centre stream node + {n_boundary} ring nodes; outlet at "
+              f"{aspect:.0f}° azimuth, slope {slope:.2f}°, radius {radius:.1f} m "
+              f"(Δz {station_elev - outlet_z:.2f} m) -> {output_file}")
+        return gdf
+
+    @staticmethod
+    def _dem_terrain(dem_file, x, y, radius):
+        """Sample station elevation and derive slope/aspect over the cell footprint.
+
+        The station elevation is the DEM value at ``(x, y)``. Slope (deg) and downslope
+        aspect (deg azimuth clockwise from north) come from a least-squares plane fit
+        to every DEM cell within ``radius`` of ``(x, y)`` — i.e. at the scale of the
+        station's representative cell, not the DEM pixel. This prevents fine-resolution
+        micro-topography from dominating the gradient. Falls back to a flat result
+        (slope 0°, aspect 0°) if fewer than three valid cells fall within the radius
+        (e.g. a tiny radius relative to the DEM, or the station on the raster edge).
+        """
+        with rasterio.open(dem_file) as src:
+            elev = float(next(src.sample([(x, y)]))[0])
+            row, col = src.index(x, y)
+            t = src.transform
+            res_x = abs(t.a)
+            res_y = abs(t.e)
+            npix_x = max(1, int(np.ceil(radius / res_x)))
+            npix_y = max(1, int(np.ceil(radius / res_y)))
+            r0, r1 = max(row - npix_y, 0), min(row + npix_y + 1, src.height)
+            c0, c1 = max(col - npix_x, 0), min(col + npix_x + 1, src.width)
+            win = src.read(1, window=((r0, r1), (c0, c1))).astype(float)
+            nodata = src.nodata
+            # Cell-centre real-world coordinates for the window (north-up assumed).
+            xs = t.c + (np.arange(c0, c1) + 0.5) * t.a
+            ys = t.f + (np.arange(r0, r1) + 0.5) * t.e
+            xg, yg = np.meshgrid(xs, ys)
+
+        mask = (xg - x) ** 2 + (yg - y) ** 2 <= radius ** 2
+        mask &= np.isfinite(win)
+        if nodata is not None:
+            mask &= win != nodata
+
+        n_cells = int(mask.sum())
+        if n_cells < 3:
+            print(f"  WARNING: terrain footprint (radius {radius:.0f} m) covers only "
+                  f"{n_cells} DEM cell(s); cannot fit a slope/aspect plane — treating as "
+                  f"flat. Increase terrain_radius.")
+            return elev, 0.0, 0.0
+        if n_cells < 9:
+            print(f"  WARNING: terrain footprint (radius {radius:.0f} m) spans only "
+                  f"{n_cells} DEM cells; derived slope/aspect may be noisy. Consider a "
+                  f"larger terrain_radius.")
+
+        # Fit z = a*(X-x) + b*(Y-y) + c; a = dz/d_east, b = dz/d_north (per-metre).
+        # Coordinates are centred on the station for numerical conditioning.
+        A = np.column_stack([xg[mask] - x, yg[mask] - y, np.ones(int(mask.sum()))])
+        coef, *_ = np.linalg.lstsq(A, win[mask], rcond=None)
+        a, b = float(coef[0]), float(coef[1])
+        slope_deg = float(np.degrees(np.arctan(np.hypot(a, b))))
+        # Downslope direction = -(a, b) in (east, north); azimuth from north clockwise.
+        aspect_deg = float(np.degrees(np.arctan2(-a, -b)) % 360.0)
+        return elev, slope_deg, aspect_deg
