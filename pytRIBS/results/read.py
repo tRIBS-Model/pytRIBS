@@ -35,7 +35,7 @@ class Read():
         """
         # currently only read for outlet, neet to add for hydronodelist
         qout_file = self.options["outfilename"]["value"]+'_Outlet.qout'
-        qout_df = pd.read_csv(qout_file, header=None, names=['Time_hr', 'Qstrm_m3s', 'Hlev_m'], skiprows=1, sep='\t')
+        qout_df = pd.read_csv(qout_file, header=None, names=['Time_hr', 'Qstrm_m3s', 'Hlev_m'], skiprows=1, sep=',')
 
         starting_date = self.options["startdate"]["value"]
         date = self.convert_to_datetime(starting_date)
@@ -50,11 +50,9 @@ class Read():
         from `self.options`, combined with the runtime value, and appends `"_00.mrf"` to it.
 
         This method performs the following steps:
-        1. Reads the column names and units from the first two rows of the `.mrf` file.
-        2. Loads the data into a DataFrame, skipping the first two rows which contain metadata.
-        3. Assigns the read column names to the DataFrame and adds the units as metadata.
-        4. Converts the `Time` column from hours since the start date to actual timestamps.
-        5. Updates the `self.mrf` attribute with the results, excluding extra time steps that may be included in the file.
+        1. Reads the data into a DataFrame using the single CSV header line for column names.
+        2. Converts the `Time` column from hours since the start date to actual timestamps.
+        3. Updates the `self.mrf` attribute with the results, excluding extra time steps that may be included in the file.
 
         Parameters
         ----------
@@ -75,19 +73,9 @@ class Read():
 
             mrf_file = self.options["outfilename"]["value"] + runtime + "_00.mrf"
 
-        # Read the first two rows to get column names and units
-        with open(mrf_file, 'r') as file:
-            column_names = file.readline().strip().split('\t')  # Assuming tab-separated data
-            units = file.readline().strip().split('\t')  # Assuming tab-separated data
-
-        # Read the data into a DataFrame, skipping the first two rows
-        results_data_frame = pd.read_csv(mrf_file, skiprows=1, sep='\t')
-
-        # Assign column names to the DataFrame
-        results_data_frame.columns = column_names
-
-        # Add units as metadata
-        results_data_frame.attrs["units"] = units
+        # As of tRIBS v6.0.0 the .mrf file is a single CSV header line followed by
+        # comma-delimited data rows (the separate units row has been removed).
+        results_data_frame = pd.read_csv(mrf_file, sep=',', header=0)
 
         # # update time from hourly time step to date
         starting_date = self.options["startdate"]["value"]
@@ -172,7 +160,7 @@ class Read():
             DataFrame containing the results with an updated `Time` column reflecting datetime values.
         """
 
-        results_data_frame = pd.read_csv(element_results_file, sep=r"\s+", header=0)
+        results_data_frame = pd.read_csv(element_results_file, sep=',', header=0)
 
         # update time from hourly time step to date
         starting_date = self.options["startdate"]["value"]
