@@ -17,7 +17,7 @@ from pytRIBS.results.evaluate import Evaluate
 # preprocessing componets
 from pytRIBS.soil.soil import SoilProcessor
 from pytRIBS.met.met import MetProcessor
-from pytRIBS.mesh.mesh import Preprocess, GenerateMesh
+from pytRIBS.mesh.mesh import Preprocess, GenerateMesh, MeshProcessor
 from pytRIBS.land.land import LandProcessor
 
 import os
@@ -310,7 +310,7 @@ class Land(LandProcessor):
         self.optluintercept = options['optluinterp']
 
 
-class Mesh:
+class Mesh(MeshProcessor):
     """
     A pytRIBS Mesh Class.
 
@@ -328,6 +328,10 @@ class Mesh:
         Path to the input file for initializing attributes.
     meta : dict, optional
         Metadata associated with the mesh.
+    mesh_dir : str, optional
+        Default output directory for generated mesh files (typically
+        ``proj.directories['mesh']``). Used by :meth:`build_mesh` and friends when no
+        explicit output location is given. Defaults to the current working directory.
 
     Attributes
     ----------
@@ -359,11 +363,16 @@ class Mesh:
     """
 
     def __init__(self, preprocess_args=None, generate_mesh_args=None,
-                 input_file=None, meta= None):
+                 input_file=None, meta=None, mesh_dir=None):
         Meta.__init__(self)
 
         if meta is not None:
             self.meta = meta
+
+        # Default directory for generated mesh outputs (e.g. proj.directories['mesh']).
+        # Used by build_mesh/generate_pslg_mesh/generate_points_mesh when no explicit
+        # output location is given, mirroring Preprocess's dir_proccesed convention.
+        self.mesh_dir = mesh_dir
 
         boundary_gdf = None
         if preprocess_args is not None:  # TODO need to catch if generate_mesh_args is NONE
@@ -383,6 +392,7 @@ class Mesh:
 
         # Initialize attributes
         self.pointfilename = options['pointfilename']
+        self.inputdatafile = options['inputdatafile']
         self.graphfile = options['graphfile']
         self.optmeshinput = options['optmeshinput']
         self.graphoption = options['graphoption']
@@ -396,7 +406,6 @@ class Mesh:
         # If a watershed was delineated above, auto-populate the solar position keywords from it
         if boundary_gdf is not None:
             Aux.update_solar_position(self, boundary_gdf.geometry.iloc[0])
-
 
 class Met(MetProcessor):
     """
