@@ -776,15 +776,30 @@ class InOut:
             file.writelines(updated_lines)
 
     @staticmethod
-    def write_node_file(node_ids, file_path):
-        # Open the file for writing
-        with open(file_path, 'w') as file:
-            # Write the total number of items at the top
-            file.write(f"{len(node_ids)}\n")
+    def write_node_file(nodes, file_path, coords=False):
+        """
+        Writes a tRIBS node-list file (*.nol) used by the NODEOUTPUTLIST,
+        HYDRONODELIST, and OUTLETNODELIST options.
 
-            # Write each item on a separate line
-            for number in node_ids:
-                file.write(f"{number}\n")
+        As of tRIBS v6.0.0 these files are CSV with a single header line that is
+        either ``ID`` or ``X,Y``, followed by one row per node (an ID, or an X,Y
+        coordinate pair).
+
+        :param nodes: Sequence of node IDs (when ``coords=False``), or a sequence of
+            ``(x, y)`` coordinate pairs (when ``coords=True``).
+        :param file_path: Output file path.
+        :param coords: If True, write an ``X,Y`` coordinate file; otherwise write an
+            ``ID`` file. Defaults to False.
+        """
+        with open(file_path, 'w') as file:
+            if coords:
+                file.write("X,Y\n")
+                for x, y in nodes:
+                    file.write(f"{x},{y}\n")
+            else:
+                file.write("ID\n")
+                for node_id in nodes:
+                    file.write(f"{node_id}\n")
 
     @staticmethod
     def write_geotiff(raster_dict, output_file_path, dtype='float32', compress=None):
