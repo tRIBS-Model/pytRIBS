@@ -80,7 +80,7 @@ class Read():
         # # update time from hourly time step to date
         starting_date = self.options["startdate"]["value"]
         date = self.convert_to_datetime(starting_date)
-        dt = pd.to_timedelta(results_data_frame['Time'], unit='h')
+        dt = pd.to_timedelta(results_data_frame['Time_hr'], unit='h')
         results_data_frame['Time'] = [date + step for step in dt]
 
         self.mrf['mrf'] = results_data_frame.iloc[0:int(self.options['runtime'][

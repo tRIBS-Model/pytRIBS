@@ -148,43 +148,41 @@ class Shared:
     @staticmethod
     def read_node_list(file_path):
         """
-        Returns node list provide by .dat file.
+        Returns the node list from a tRIBS node-list file (*.nol).
 
-        The node list can be further modified or used for reading in element/pixel files and subsequent processing.
+        As of tRIBS v6.0.0 these files are CSV with a single header line that is
+        either ``ID`` or ``X,Y``, followed by one row per node. When the header is
+        ``ID`` a list of ID strings is returned; when it is ``X,Y`` a list of
+        ``(x, y)`` string tuples is returned.
 
-        :param file_path: Relative or absolute file path to .dat file.
+        The node list can be further modified or used for reading in element/pixel
+        files and subsequent processing.
+
+        :param file_path: Relative or absolute file path to the *.nol file.
         :type file_path: str
-        :return: List of nodes specified by .dat file
+        :return: List of node IDs, or list of (x, y) coordinate tuples.
         :rtype: list
 
         """
         try:
             with open(file_path, 'r') as file:
-                lines = file.readlines()
-
-            # Initialize an empty list to store the IDs
-            node_ids = []
-
-            # Check if the file is empty or has invalid content
-            if not lines:
-                return node_ids
-
-            # Parse the first column as the size of the array
-            size = int(lines[0].strip())
-
-            # Extract IDs from the remaining lines
-            for line in lines[1:]:
-                id_value = line.strip()
-                node_ids.append(id_value)
-
-            # Ensure the array has the specified size
-            if len(node_ids) != size:
-                print("Warning: Array size does not match the specified size in the file.")
-
-            return node_ids
+                lines = [line.strip() for line in file if line.strip()]
         except FileNotFoundError:
             print(f"Error: File '{file_path}' not found.")
             return []
+
+        # Empty or header-only file
+        if len(lines) < 2:
+            return []
+
+        header = lines[0].lower().replace(' ', '')
+        data = lines[1:]
+
+        if header == 'x,y':
+            return [tuple(row.split(',')) for row in data]
+
+        # Default to an ID column (also tolerates a bare 'id' header)
+        return [row.split(',')[0] for row in data]
 
     def read_reach_file(self, filename=None):
         """
