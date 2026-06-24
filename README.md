@@ -31,9 +31,12 @@ The v1.0.0 changes listed below are abbreviated. For specific details refer to t
 * **Static Land Use Grids:** Grid-file path validation now recognizes the new static gridded land use option (`OPTLANDUSE = 2`). ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/34))
 * **Solar Position Calculations:** Variables for computing the solar position have been moved from the station data files into the main input file as keywords. ([#35](https://github.com/tRIBS-Model/pytRIBS/pull/35))
 * **Forcing Data File Formats:** Reworked the precipitation/meteorological data files (`.sdf` and `.mdf`) readers and writers to the new single-header, comma-delimited v6.0.0 format. ([#35](https://github.com/tRIBS-Model/pytRIBS/pull/35))
+* **Output File Formats:** Updated the `.pixel`, `.qout`, `.mrf`, and spatial output map readers for the new v6.0.0 format of a single CSV header line followed by comma-delimited rows. The `.mrf` reader no longer expects a separate units row. ([#40](https://github.com/tRIBS-Model/pytRIBS/pull/40))
+* **Node-List Files:** Updated the node-list (`.nol`) reader and writer (`NODEOUTPUTLIST`, `HYDRONODELIST`, `OUTLETNODELIST`) to the new v6.0.0 CSV format: a single `ID` or `X,Y` header line followed by one node per row. `write_node_file` now supports writing coordinate (`X,Y`) lists via the `coords` argument. ([#40](https://github.com/tRIBS-Model/pytRIBS/pull/40))
   
 #### Removed
 * **Legacy Land Use Parameters:** Removed the Gray (1970) interception parameters (`a`, `b1`) from the land use table. ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/34))
+* **Parallel Output Merging:** tRIBS v6.0.0 now writes the same consolidated spatial, Voronoi, and integrated output files in parallel mode as in serial mode. The per-processor-rank merging logic (`merge_parallel_voi`, the `parallelmode` branches in `get_spatial_files` and `get_invariant_properties`) has been removed. ([#40](https://github.com/tRIBS-Model/pytRIBS/pull/40))
 
 ### Version 0.7.3 (06/17/2026)
 This release introduces the support for Python 3.13. The code was tested using a full example model setup but not every pytRIBS function was tested. PLease open an issue if you come across other problems.
