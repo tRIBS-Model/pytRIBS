@@ -58,7 +58,8 @@ class WaterBalance:
 
         Notes
         -----
-        - The method reads node results from the node output list and calculates the water balance for each element.
+        - The method calculates the water balance for each element loaded by get_element_results(),
+          using the node IDs parsed from the *.pixel output filenames.
         - The `method` parameter determines how the time period is defined for water balance calculations:
           - 'full': The full simulation period.
           - 'water_year': Calculations based on the water year.
@@ -74,11 +75,15 @@ class WaterBalance:
            >>> get_element_water_balance(['2024-01-01', '2024-01-31'])
         """
 
-        node_file = self.options["nodeoutputlist"]["value"]
-        nodes = self.read_node_list(node_file)
-    
-        for n in nodes:
-            n = int(n)
+        # Node IDs come from the loaded element (*.pixel) results rather than the
+        # node-list (*.nol) file. The pixel output filenames always carry the node
+        # ID regardless of whether the .nol file was specified by ID or by X,Y
+        # coordinates, so this works for both node-list formats.
+        if not self.element:
+            print("No element results loaded. Run get_element_results() first.")
+            return
+
+        for n in self.element:
             waterbalance = self._run_element_water_balance(n, method)
             self.element[n]["waterbalance"] = waterbalance
     
