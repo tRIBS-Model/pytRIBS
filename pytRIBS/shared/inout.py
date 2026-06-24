@@ -1,4 +1,5 @@
 import os
+import collections
 from datetime import datetime
 import getpass
 import geopandas as gpd
@@ -6,7 +7,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 import math
-from shapely.geometry import Point
+from shapely.geometry import Point, LineString, Polygon
 import json
 
 
@@ -70,6 +71,197 @@ class InOut:
                 x, y = row['geometry'].x, row['geometry'].y
                 z, bc = row['elevation'], int(row['bc'])
                 file.write(f"{x} {y} {z} {bc}\n")
+
+    @staticmethod
+    def write_mesh_files(output_prefix, output_path, vertices, triangles, node_codes):
+        """
+        Write the four tRIBS mesh files describing a complete, pre-triangulated TIN.
+
+        Produces ``{output_path}{output_prefix}.z``, ``.nodes``, ``.edges`` and
+        ``.tri``. Together these fully specify the mesh connectivity (node spokes,
+        directed edges with CCW ``nextid`` ordering, and per-triangle edge and
+        neighbour tables) so that tRIBS can read the mesh directly without running
+        the meshbuilder.
+
+        Parameters
+        ----------
+        output_prefix : str
+            Base name for the four output files (without extension).
+        output_path : str
+            Directory prefix prepended to ``output_prefix``. Should include a
+            trailing separator (e.g. ``'data/model/mesh/'``).
+        vertices : numpy.ndarray
+            Array of shape (nnodes, 3) of node x, y, z coordinates.
+        triangles : numpy.ndarray
+            Array of shape (ntri, 3) of node indices for each triangle.
+        node_codes : array_like
+            Per-node boundary code (0=interior, 1=boundary, 2=outlet, 3=stream).
+
+        Returns
+        -------
+        None
+        """
+        print("\n--- Preparing to write tRIBS mesh files ---")
+        nnodes, ntri = len(vertices), len(triangles)
+
+        # Ensure CCW winding
+        for i in range(ntri):
+            p0, p1, p2 = triangles[i]
+            area = 0.5 * (
+                vertices[p0, 0] * (vertices[p1, 1] - vertices[p2, 1]) +
+                vertices[p1, 0] * (vertices[p2, 1] - vertices[p0, 1]) +
+                vertices[p2, 0] * (vertices[p0, 1] - vertices[p1, 1])
+            )
+            if area < 0:
+                triangles[i] = [p0, p2, p1]
+
+        undirected_edges = {
+            tuple(sorted((tri[i], tri[(i + 1) % 3])))
+            for tri in triangles for i in range(3)
+        }
+        edge_list, directed_edge_to_id = [], {}
+        for p1, p2 in sorted(undirected_edges):
+            directed_edge_to_id[(p1, p2)] = len(edge_list); edge_list.append([p1, p2])
+            directed_edge_to_id[(p2, p1)] = len(edge_list); edge_list.append([p2, p1])
+        nedges = len(edge_list)
+
+        spokes = collections.defaultdict(list)
+        for i, edge in enumerate(edge_list):
+            spokes[edge[0]].append(i)
+
+        node_edgid = -np.ones(nnodes, dtype=int)
+        edge_nextid = -np.ones(nedges, dtype=int)
+
+        for node_id, edge_ids in spokes.items():
+            angles = [
+                (np.arctan2(
+                    vertices[edge_list[eid][1], 1] - vertices[node_id, 1],
+                    vertices[edge_list[eid][1], 0] - vertices[node_id, 0]
+                ), eid)
+                for eid in edge_ids
+            ]
+            angles.sort()
+            sorted_eids = [eid for _, eid in angles]
+            node_edgid[node_id] = sorted_eids[0]
+            for i in range(len(sorted_eids)):
+                edge_nextid[sorted_eids[i]] = sorted_eids[(i + 1) % len(sorted_eids)]
+
+        undirected_edge_to_tris = collections.defaultdict(list)
+        for i, tri in enumerate(triangles):
+            for j in range(3):
+                key = tuple(sorted((tri[j], tri[(j + 1) % 3])))
+                undirected_edge_to_tris[key].append(i)
+
+        tri_neighbors = -np.ones((ntri, 3), dtype=int)
+        for i, tri in enumerate(triangles):
+            for j in range(3):
+                key = tuple(sorted((tri[j], tri[(j + 1) % 3])))
+                nbrs = undirected_edge_to_tris[key]
+                if len(nbrs) == 2:
+                    tri_neighbors[i, j] = nbrs[1] if nbrs[0] == i else nbrs[0]
+
+        with open(f"{output_path}{output_prefix}.z", "w") as f:
+            f.write("0.000000\n")
+            f.write(f"{nnodes}\n")
+            np.savetxt(f, vertices[:, 2], fmt='%.6f')
+
+        with open(f"{output_path}{output_prefix}.nodes", "w") as f:
+            f.write("0.000000\n")
+            f.write(f"{nnodes}\n")
+            for i in range(nnodes):
+                if node_edgid[i] == -1:
+                    raise RuntimeError(f"Node {i} is isolated (no edges).")
+                f.write(f"{vertices[i, 0]:.6f} {vertices[i, 1]:.6f} {node_edgid[i]} {node_codes[i]}\n")
+
+        with open(f"{output_path}{output_prefix}.edges", "w") as f:
+            f.write("0.000000\n")
+            f.write(f"{nedges}\n")
+            for i in range(nedges):
+                f.write(f"{edge_list[i][0]} {edge_list[i][1]} {edge_nextid[i]}\n")
+
+        with open(f"{output_path}{output_prefix}.tri", "w") as f:
+            f.write("0.000000\n")
+            f.write(f"{ntri}\n")
+            for i in range(ntri):
+                p0, p1, p2 = triangles[i]
+                n0 = tri_neighbors[i, 1]   # opposite p0 → shares edge p1-p2
+                n1 = tri_neighbors[i, 2]   # opposite p1 → shares edge p2-p0
+                n2 = tri_neighbors[i, 0]   # opposite p2 → shares edge p0-p1
+                e0 = directed_edge_to_id[(p0, p2)]  # origin=p0, dest=p2
+                e1 = directed_edge_to_id[(p1, p0)]  # origin=p1, dest=p0
+                e2 = directed_edge_to_id[(p2, p1)]  # origin=p2, dest=p1
+                f.write(f"{p0} {p1} {p2} {n0} {n1} {n2} {e0} {e1} {e2}\n")
+
+        print("\n--- All tRIBS mesh files have been generated successfully. ---")
+
+    @staticmethod
+    def write_mesh_diagnostics(output_base, vertices, triangles, node_codes, crs=None):
+        """
+        Write diagnostic shapefiles for visual inspection of a generated mesh.
+
+        Produces three shapefiles: ``{output_base}_triangles.shp``,
+        ``{output_base}_nodes.shp`` and ``{output_base}_edges.shp``. Each feature
+        carries a ``code`` attribute (0=Interior, 1=Boundary, 2=Outlet, 3=Stream)
+        for checking that boundary, outlet and stream nodes are placed correctly.
+
+        Parameters
+        ----------
+        output_base : str
+            Base path (without extension) for the three shapefiles.
+        vertices : numpy.ndarray
+            Array of shape (nnodes, 3) of node x, y, z coordinates.
+        triangles : numpy.ndarray
+            Array of shape (ntri, 3) of node indices for each triangle.
+        node_codes : array_like
+            Per-node boundary code (0=interior, 1=boundary, 2=outlet, 3=stream).
+        crs : optional
+            Coordinate reference system passed through to GeoPandas.
+
+        Returns
+        -------
+        None
+        """
+        print(f"\n--- Writing diagnostic shapefiles to {output_base}_*.shp ---")
+
+        polys, tri_codes = [], []
+        for tri_indices in triangles:
+            polys.append(Polygon(vertices[tri_indices][:, :2]))
+            codes_in_tri = node_codes[tri_indices]
+            if 2 in codes_in_tri:
+                tri_codes.append(2)
+            elif 3 in codes_in_tri:
+                tri_codes.append(3)
+            elif 1 in codes_in_tri:
+                tri_codes.append(1)
+            else:
+                tri_codes.append(0)
+        gpd.GeoDataFrame({'code': tri_codes}, geometry=polys, crs=crs).to_file(
+            f"{output_base}_triangles.shp", driver='ESRI Shapefile'
+        )
+
+        pts = [Point(v[0], v[1]) for v in vertices]
+        gpd.GeoDataFrame(
+            {'code': node_codes, 'elev': vertices[:, 2]},
+            geometry=pts, crs=crs
+        ).to_file(f"{output_base}_nodes.shp", driver='ESRI Shapefile')
+
+        _priority = {0: 1, 1: 2, 3: 0, 2: 3}
+        seen = set()
+        edge_lines, edge_codes = [], []
+        for tri in triangles:
+            for k in range(3):
+                i, j = tri[k], tri[(k + 1) % 3]
+                key = (min(i, j), max(i, j))
+                if key in seen:
+                    continue
+                seen.add(key)
+                edge_lines.append(LineString([vertices[i, :2], vertices[j, :2]]))
+                ci, cj = int(node_codes[i]), int(node_codes[j])
+                edge_codes.append(ci if _priority.get(ci, 0) >= _priority.get(cj, 0) else cj)
+        gpd.GeoDataFrame({'code': edge_codes}, geometry=edge_lines, crs=crs).to_file(
+            f"{output_base}_edges.shp", driver='ESRI Shapefile'
+        )
+        print(f"  Wrote {len(polys)} triangles, {len(pts)} nodes, {len(edge_lines)} edges.")
 
     def write_input_file(self, output_file_path):
         """
