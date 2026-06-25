@@ -17,6 +17,7 @@ from pytRIBS.results.evaluate import Evaluate
 # preprocessing componets
 from pytRIBS.soil.soil import SoilProcessor
 from pytRIBS.met.met import MetProcessor
+from pytRIBS.spinup.spinup import SpinupProcessor
 from pytRIBS.mesh.mesh import Preprocess, GenerateMesh, MeshProcessor
 from pytRIBS.land.land import LandProcessor
 
@@ -59,6 +60,8 @@ class Project:
             "model": os.path.join("data", "model"),
             "preprocessing": os.path.join("data", "preprocessing"),
             "results": "results",
+            "spinup": os.path.join("results", "spinup"),
+            "restart": "restart",
             "soil": os.path.join("data", "model", "soil"),
             "land": os.path.join("data", "model", "land"),
             "met_precip": os.path.join("data", "model", "met", "precip"),
@@ -79,7 +82,7 @@ class Project:
             full_path = os.path.join(self.base_dir, rel_path)
             os.makedirs(full_path, exist_ok=True)
 
-class Model(Infile, Shared, Aux, ModelProcessor, Preprocess, InOut):
+class Model(Infile, Shared, Aux, ModelProcessor, Preprocess, InOut, SpinupProcessor):
     """
     pytRIBS Model class.
 
@@ -139,10 +142,15 @@ class Model(Infile, Shared, Aux, ModelProcessor, Preprocess, InOut):
 
     # SIMULATION METHODS
     def __getattr__(self, name):
-        if name in self.options:
-            return self.options[name]
-        if name in self.snow_options:
-            return self.snow_options[name]
+        # __getattr__ only fires for attributes missing from __dict__. Look up options/snow_options
+        # via __dict__ directly so that probing for a missing 'options' (e.g. during copy/pickle of
+        # a not-yet-initialized instance) raises AttributeError instead of recursing.
+        options = self.__dict__.get('options')
+        if options is not None and name in options:
+            return options[name]
+        snow_options = self.__dict__.get('snow_options')
+        if snow_options is not None and name in snow_options:
+            return snow_options[name]
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
     def __dir__(self):
