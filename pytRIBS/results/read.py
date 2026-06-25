@@ -42,6 +42,53 @@ class Read():
         dt = pd.to_timedelta(qout_df['Time_hr'], unit='h')
         qout_df['Time'] = [date + step for step in dt]
         return qout_df
+
+    # SWE is written in centimeters under a different column per output file: AvSWE_cm in the
+    # basin-averaged .mrf and SnWE_cm in the per-node .pixel. get_swe_series returns it in mm.
+    _SWE_MRF_COL = 'AvSWE_cm'
+    _SWE_PIXEL_COL = 'SnWE_cm'
+    _SWE_CM_TO_MM = 10.0
+
+    def get_swe_series(self, node_id=None):
+        """
+        Return simulated snow water equivalent (SWE) as a time-indexed Series in millimeters.
+
+        SWE is stored in centimeters under a different column in each output file (``AvSWE_cm`` in
+        the basin-averaged ``.mrf``, ``SnWE_cm`` in the per-node ``.pixel``); this getter selects
+        the right column, converts to mm, and indexes by ``Time``. It is the single source of the
+        SWE column/units knowledge shared by the SWE plot and the SWE evaluation helpers.
+
+        Parameters
+        ----------
+        node_id : int, optional
+            If ``None`` (default), basin-averaged SWE from the ``.mrf``. If given, SWE for that
+            node from its ``.pixel`` output.
+
+        Returns
+        -------
+        pandas.Series
+            SWE in mm, indexed by datetime, named ``"SWE_mm"``.
+        """
+        if node_id is None:
+            if self.mrf.get('mrf') is None:
+                self.get_mrf_results()
+            df = self.mrf['mrf'].set_index('Time')
+            col, where = self._SWE_MRF_COL, 'the mrf output'
+        else:
+            if not self.element:
+                self.get_element_results()
+            if node_id not in self.element:
+                raise ValueError(f"Node {node_id} not found. Available nodes: "
+                                 f"{sorted(self.element.keys())}")
+            df = self.element[node_id]['pixel'].set_index('Time')
+            col, where = self._SWE_PIXEL_COL, f"pixel output for node {node_id}"
+
+        if col not in df.columns:
+            raise ValueError(f"SWE column '{col}' not found in {where}. Is the snow module on? "
+                             f"Available columns: {list(df.columns)}")
+
+        return (df[col] * self._SWE_CM_TO_MM).rename('SWE_mm')
+
     def get_mrf_results(self, mrf_file=None):
         """
         Reads and processes the `.mrf` file containing model results.

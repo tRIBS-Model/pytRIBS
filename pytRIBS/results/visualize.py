@@ -333,12 +333,6 @@ class Viz:
 
         return axes[0] if single else (axes[0].figure, axes)
 
-    # Raw snow-water-equivalent columns are in cm in the v6.0.0 output (AvSWE_cm in the .mrf,
-    # SnWE_cm in the .pixel); converted to mm for plotting so SWE is comparable to observations.
-    _SWE_MRF_COL = 'AvSWE_cm'
-    _SWE_PIXEL_COL = 'SnWE_cm'
-    _SWE_CM_TO_MM = 10.0
-
     def plot_swe(self, observed=None, node_id=None, start=None, end=None, ax=None, saved_fig=None):
         """
         Quick-look plot of snow water equivalent (SWE), optionally against observations.
@@ -370,27 +364,9 @@ class Viz:
         matplotlib.axes.Axes
             The axes the SWE series was drawn on.
         """
-        if node_id is None:
-            if self.mrf.get('mrf') is None:
-                self.get_mrf_results()
-            df = self.mrf['mrf'].set_index('Time')
-            col, where = self._SWE_MRF_COL, 'the mrf output'
-            label = 'Simulated SWE (basin avg)'
-        else:
-            if not self.element:
-                self.get_element_results()
-            if node_id not in self.element:
-                raise ValueError(f"Node {node_id} not found. Available nodes: "
-                                 f"{sorted(self.element.keys())}")
-            df = self.element[node_id]['pixel'].set_index('Time')
-            col, where = self._SWE_PIXEL_COL, f"pixel output for node {node_id}"
-            label = f'Simulated SWE (node {node_id})'
-
-        if col not in df.columns:
-            raise ValueError(f"SWE column '{col}' not found in {where}. Is the snow module on? "
-                             f"Available columns: {list(df.columns)}")
-
-        sim = (df[col] * self._SWE_CM_TO_MM).loc[start:end]
+        sim = self.get_swe_series(node_id).loc[start:end]
+        label = ('Simulated SWE (basin avg)' if node_id is None
+                 else f'Simulated SWE (node {node_id})')
 
         obs = self._observed_series(observed) if observed is not None else None
         if obs is not None:
