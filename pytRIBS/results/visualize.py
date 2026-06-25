@@ -91,7 +91,7 @@ class Viz:
         return observed.copy()
 
     def plot_hydrograph(self, observed=None, start=None, end=None, resample=None,
-                        ax=None, saved_fig=None):
+                        interpolate=False, ax=None, saved_fig=None):
         """
         Quick-look plot of simulated outlet streamflow, optionally against observations.
 
@@ -112,6 +112,13 @@ class Viz:
             Pandas offset alias (e.g. ``"5min"``, ``"1h"``) to resample both series to a common
             frequency (mean) before plotting. Useful when the simulation and observations are
             recorded at different intervals. If ``None``, each series is plotted as-is.
+        interpolate : bool or str, optional
+            When resampling, fill the resulting gaps in the *observed* series by interpolation
+            ``True`` uses linear interpolation, a string selects a pandas interpolation method 
+            (e.g. ``"time"``, ``"cubic"``). This is done on the full series before clipping, so 
+            an event window that falls between sparsereports (e.g. a gage that reports zero only
+            outside the window) is still anchored at its edges. Default ``False`` (plot only 
+            points that were actually observed). Has no effect unless ``resample`` is set.
         ax : matplotlib.axes.Axes, optional
             Axes to draw into. If ``None``, a new figure and axes are created.
         saved_fig : str, optional
@@ -130,11 +137,23 @@ class Viz:
             sim = sim.resample(resample).mean()
             if obs is not None:
                 obs = obs.resample(resample).mean()
+                if interpolate:
+                    # Fill gaps on the full series (before clipping) so a window between sparse
+                    # reports is anchored at its edges. Linear by default; a string picks a method.
+                    method = interpolate if isinstance(interpolate, str) else 'linear'
+                    obs = obs.interpolate(method=method)
 
         if start is not None or end is not None:
             sim = sim.loc[start:end]
             if obs is not None:
                 obs = obs.loc[start:end]
+
+        # Drop empty values so the line connects consecutive real points. Resampling onto a grid
+        # finer than the observation cadence leaves NaN bins, and matplotlib breaks the line at
+        # every NaN (which otherwise shows up as disconnected markers where data is sparse).
+        sim = sim.dropna()
+        if obs is not None:
+            obs = obs.dropna()
 
         if ax is None:
             _, ax = plt.subplots(figsize=(12, 6))
@@ -394,6 +413,63 @@ class Viz:
         ax.xaxis.set_major_locator(locator)
         ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
         ax.grid(True, linestyle=':', alpha=0.7)
+
+        if saved_fig is not None:
+            ax.figure.savefig(saved_fig, bbox_inches='tight')
+
+        return ax
+
+    def plot_voronoi(self, var, cmap='viridis', legend=True, ax=None, saved_fig=None, **kwargs):
+        """
+        Quick-look spatial map of an integrated (cumulative) variable on the Voronoi mesh.
+
+        Merges the Voronoi polygons (``self.voronoi``) with the integrated spatial variables
+        (``self.int_spatial_vars``, written at the end of the run) on ``ID`` and colors the
+        polygons by ``var``. Because the integrated output carries many variables (time-invariant
+        watershed properties such as ``Z`` and ``ID``, plus cumulative fluxes such as ``cET``), the
+        column name must be given explicitly.
+
+        Parameters
+        ----------
+        var : str
+            Column to color by (e.g. ``"Z"``, ``"ID"``, ``"cET"``).
+        cmap : str, optional
+            Matplotlib colormap name. Default ``"viridis"``.
+        legend : bool, optional
+            Draw the colorbar legend. Default ``True``.
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw into. If ``None``, a new figure and axes are created.
+        saved_fig : str, optional
+            If provided, the figure is saved to this path.
+        **kwargs
+            Passed through to ``GeoDataFrame.plot`` (e.g. ``edgecolor``, ``linewidth``, ``vmin``,
+            ``vmax``, ``legend_kwds``).
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes the map was drawn on.
+        """
+        if self.voronoi is None:
+            raise ValueError("No Voronoi polygons available (self.voronoi is None); cannot plot a "
+                             "spatial map.")
+        if self.int_spatial_vars is None:
+            raise ValueError("No integrated spatial variables available (self.int_spatial_vars is "
+                             "None); cannot plot a spatial map.")
+
+        gdf = self.voronoi.merge(self.int_spatial_vars, on='ID', how='inner')
+        if var not in gdf.columns:
+            raise ValueError(f"Column '{var}' not found in the integrated spatial output. "
+                             f"Available columns: {list(gdf.columns)}")
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(10, 8))
+
+        legend_kwds = kwargs.pop('legend_kwds', {'label': var, 'shrink': 0.8})
+        gdf.plot(ax=ax, column=var, cmap=cmap, legend=legend,
+                 legend_kwds=legend_kwds if legend else None, **kwargs)
+
+        ax.set_title(var, fontweight='bold')
 
         if saved_fig is not None:
             ax.figure.savefig(saved_fig, bbox_inches='tight')
