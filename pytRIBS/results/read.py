@@ -257,15 +257,15 @@ class Read():
 
         df = pd.DataFrame({
             'Time': mrf['Time'],
-            'Unsat_mm': mrf['MSMU'].values * mrf['MDGW'].values * porosity,
-            'Sat_mm': (bedrock_depth-mrf['MDGW'])* porosity,
-            'CanopySWE_mm': 10 * mrf['AvInSn'].values,
-            'SWE_mm': 10 * mrf['AvSWE'].values,
+            'Unsat_mm': mrf['MSMU_[]'].values * mrf['MDGW_mm'].values * porosity,
+            'Sat_mm': (bedrock_depth-mrf['MDGW_mm'])* porosity,
+            'CanopySWE_mm': 10 * mrf['AvInSn_cm'].values,
+            'SWE_mm': 10 * mrf['AvSWE_cm'].values,
             'Canop_mm': 0,  # not average canopy  storage
-            'P_mm_h': mrf['MAP'],
-            'ET_mm_h': mrf['MET'] - 10 * (mrf['AvSnSub'] + mrf['AvSnEvap'] + mrf['AvInSu']),
-            'Qsurf_mm_h': mrf['Srf'] * 3600 * 1000 / drainage_area,
-            'Qunsat_mm_h': mrf['Qunsat'],  # assumed zero, but not sure if correct?
+            'P_mm_h': mrf['MAP_mm_hr'],
+            'ET_mm_h': mrf['MET_mm'] - 10 * (mrf['AvSnSub_cm'] + mrf['AvSnEvap_cm'] + mrf['AvInSu_cm']),
+            'Qsurf_mm_h': mrf['Srf_m3_s'] * 3600 * 1000 / drainage_area,
+            'Qunsat_mm_h': mrf['Qunsat_mm_hr'],  # assumed zero, but not sure if correct?
             'Qsat_mm_h': 0  # assumed zero, but not sure if correct?
         })
 
