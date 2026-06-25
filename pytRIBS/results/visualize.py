@@ -78,6 +78,18 @@ class Viz:
 
         return fig, ax
 
+    @staticmethod
+    def _observed_series(observed):
+        """Coerce an observed input to a Series copy. Accepts a Series or a one-column DataFrame
+        (which is squeezed); raises if a multi-column DataFrame is passed. The caller is
+        responsible for the datetime index and units."""
+        if hasattr(observed, 'columns'):  # DataFrame
+            if observed.shape[1] != 1:
+                raise ValueError("observed DataFrame must have a single column; pass a Series "
+                                 "or a one-column DataFrame.")
+            observed = observed.iloc[:, 0]
+        return observed.copy()
+
     def plot_hydrograph(self, observed=None, start=None, end=None, resample=None,
                         ax=None, saved_fig=None):
         """
@@ -112,14 +124,7 @@ class Viz:
         """
         sim = self.get_qout_results().set_index('Time')['Qstrm_m3s']
 
-        obs = observed
-        if obs is not None:
-            if hasattr(obs, 'columns'):  # DataFrame
-                if obs.shape[1] != 1:
-                    raise ValueError("observed DataFrame must have a single discharge column; "
-                                     "pass a Series or a one-column DataFrame.")
-                obs = obs.iloc[:, 0]
-            obs = obs.copy()
+        obs = self._observed_series(observed) if observed is not None else None
 
         if resample is not None:
             sim = sim.resample(resample).mean()
@@ -308,6 +313,92 @@ class Viz:
             axes[0].figure.savefig(saved_fig, bbox_inches='tight')
 
         return axes[0] if single else (axes[0].figure, axes)
+
+    # Raw snow-water-equivalent columns are in cm in the v6.0.0 output (AvSWE_cm in the .mrf,
+    # SnWE_cm in the .pixel); converted to mm for plotting so SWE is comparable to observations.
+    _SWE_MRF_COL = 'AvSWE_cm'
+    _SWE_PIXEL_COL = 'SnWE_cm'
+    _SWE_CM_TO_MM = 10.0
+
+    def plot_swe(self, observed=None, node_id=None, start=None, end=None, ax=None, saved_fig=None):
+        """
+        Quick-look plot of snow water equivalent (SWE), optionally against observations.
+
+        Plots simulated SWE in millimeters from either the basin-averaged ``.mrf`` output or a
+        single element's ``.pixel`` output, and optionally overlays observations. SWE is stored in
+        centimeters under different column names per file (``AvSWE_cm`` in the ``.mrf``,
+        ``SnWE_cm`` in the ``.pixel``); this method handles both and converts to mm so simulated
+        and observed series line up. This is the snow analog of :meth:`plot_hydrograph` and is a
+        common calibration target.
+
+        Parameters
+        ----------
+        observed : pandas.Series or pandas.DataFrame, optional
+            Observed SWE with a datetime index, in millimeters. A one-column DataFrame is accepted
+            and squeezed to a Series.
+        node_id : int, optional
+            If ``None`` (default), plots basin-averaged SWE from the ``.mrf``. If given, plots SWE
+            for that node from its ``.pixel`` output.
+        start, end : str or datetime-like, optional
+            Restrict the plot to this window.
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw into. If ``None``, a new figure and axes are created.
+        saved_fig : str, optional
+            If provided, the figure is saved to this path.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes the SWE series was drawn on.
+        """
+        if node_id is None:
+            if self.mrf.get('mrf') is None:
+                self.get_mrf_results()
+            df = self.mrf['mrf'].set_index('Time')
+            col, where = self._SWE_MRF_COL, 'the mrf output'
+            label = 'Simulated SWE (basin avg)'
+        else:
+            if not self.element:
+                self.get_element_results()
+            if node_id not in self.element:
+                raise ValueError(f"Node {node_id} not found. Available nodes: "
+                                 f"{sorted(self.element.keys())}")
+            df = self.element[node_id]['pixel'].set_index('Time')
+            col, where = self._SWE_PIXEL_COL, f"pixel output for node {node_id}"
+            label = f'Simulated SWE (node {node_id})'
+
+        if col not in df.columns:
+            raise ValueError(f"SWE column '{col}' not found in {where}. Is the snow module on? "
+                             f"Available columns: {list(df.columns)}")
+
+        sim = (df[col] * self._SWE_CM_TO_MM).loc[start:end]
+
+        obs = self._observed_series(observed) if observed is not None else None
+        if obs is not None:
+            obs = obs.loc[start:end]
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(12, 6))
+
+        ax.plot(sim.index, sim.values, label=label, color='#1f77b4', linewidth=2)
+        if obs is not None:
+            ax.plot(obs.index, obs.values, label='Observed', color='black', marker='o',
+                    markersize=4, linestyle='--', linewidth=1)
+            ax.legend()
+
+        ax.set_ylabel('SWE (mm)')
+        ax.set_xlabel('Date')
+        ax.set_title('Simulated vs. Observed SWE' if obs is not None else 'Simulated SWE')
+
+        locator = mdates.AutoDateLocator()
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        ax.grid(True, linestyle=':', alpha=0.7)
+
+        if saved_fig is not None:
+            ax.figure.savefig(saved_fig, bbox_inches='tight')
+
+        return ax
 
     def create_animation(self, outfile, df_dict, frames, var, fps=4, vlims=None, nan_color='gray',
                          nan_edge_color='red', cmap='viridis'):
