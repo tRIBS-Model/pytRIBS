@@ -1,5 +1,6 @@
 import numpy as np
 from matplotlib import pyplot as plt
+import matplotlib.dates as mdates
 from matplotlib.animation import FuncAnimation
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
@@ -76,6 +77,83 @@ class Viz:
             plt.savefig(saved_fig, bbox_inches='tight')
 
         return fig, ax
+
+    def plot_hydrograph(self, observed=None, start=None, end=None, resample=None,
+                        ax=None, saved_fig=None):
+        """
+        Quick-look plot of simulated outlet streamflow, optionally against observations.
+
+        Plots the outlet discharge (``Qstrm_m3s``) from the ``.qout`` file versus time. This is a
+        fast "did my run do something sane?" look, not a publication figure; it returns the
+        ``Axes`` so it can be styled further or composed into a larger figure.
+
+        Parameters
+        ----------
+        observed : pandas.Series or pandas.DataFrame, optional
+            Observed discharge with a datetime index, in the same units as the simulation
+            (m^3/s). A one-column DataFrame is accepted and squeezed to a Series. Any unit
+            conversion or loading is the caller's responsibility.
+        start, end : str or datetime-like, optional
+            Restrict the plot to this window (e.g. a single storm event). Applied to both the
+            simulated and observed series.
+        resample : str, optional
+            Pandas offset alias (e.g. ``"5min"``, ``"1h"``) to resample both series to a common
+            frequency (mean) before plotting. Useful when the simulation and observations are
+            recorded at different intervals. If ``None``, each series is plotted as-is.
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw into. If ``None``, a new figure and axes are created.
+        saved_fig : str, optional
+            If provided, the figure is saved to this path.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes the hydrograph was drawn on (use ``ax.figure`` for the figure).
+        """
+        sim = self.get_qout_results().set_index('Time')['Qstrm_m3s']
+
+        obs = observed
+        if obs is not None:
+            if hasattr(obs, 'columns'):  # DataFrame
+                if obs.shape[1] != 1:
+                    raise ValueError("observed DataFrame must have a single discharge column; "
+                                     "pass a Series or a one-column DataFrame.")
+                obs = obs.iloc[:, 0]
+            obs = obs.copy()
+
+        if resample is not None:
+            sim = sim.resample(resample).mean()
+            if obs is not None:
+                obs = obs.resample(resample).mean()
+
+        if start is not None or end is not None:
+            sim = sim.loc[start:end]
+            if obs is not None:
+                obs = obs.loc[start:end]
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(12, 6))
+
+        ax.plot(sim.index, sim.values, label='Simulated (tRIBS)', color='#1f77b4', linewidth=2)
+        if obs is not None:
+            ax.plot(obs.index, obs.values, label='Observed', color='black', marker='o',
+                    markersize=4, linestyle='--', linewidth=1)
+            ax.legend()
+
+        ax.set_ylabel('Streamflow ($m^3/s$)')
+        ax.set_xlabel('Date')
+        ax.set_title('Simulated vs. Observed Streamflow at Outlet' if obs is not None
+                     else 'Simulated Streamflow at Outlet')
+
+        locator = mdates.AutoDateLocator()
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        ax.grid(True, linestyle=':', alpha=0.7)
+
+        if saved_fig is not None:
+            ax.figure.savefig(saved_fig, bbox_inches='tight')
+
+        return ax
 
     def create_animation(self, outfile, df_dict, frames, var, fps=4, vlims=None, nan_color='gray',
                          nan_edge_color='red', cmap='viridis'):
