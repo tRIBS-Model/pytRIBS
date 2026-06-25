@@ -67,8 +67,8 @@ class Viz:
         waterbalance.plot.bar(ax=ax, y=["nQ", "nET", "dS"], stacked=True, width=barwidth,
                               color=['tab:blue', 'tab:red', 'tab:cyan'])
         ax.legend(bbox_to_anchor=(1.35, 0.85), loc='center right',
-                  labels=["Precip.", "Runoff", "Evapo. Trans.", "$\Delta$ Storage"])
-        ax.set_ylabel("Water Flux & $\Delta$ Storage (mm)")
+                  labels=["Precip.", "Runoff", "Evapo. Trans.", r"$\Delta$ Storage"])
+        ax.set_ylabel(r"Water Flux & $\Delta$ Storage (mm)")
         ax.set_xticks(range(len(waterbalance.index)), waterbalance.index.strftime("%Y-%m"), rotation=45)
         fig.autofmt_xdate()
         plt.show()
@@ -154,6 +154,160 @@ class Viz:
             ax.figure.savefig(saved_fig, bbox_inches='tight')
 
         return ax
+
+    def plot_mrf(self, var, rainfall='MAP_mm_hr', start=None, end=None, invert=False,
+                 ax=None, saved_fig=None):
+        """
+        Quick-look plot of a basin-averaged (``.mrf``) variable with the rainfall hyetograph.
+
+        Plots one or more basin-averaged time series on the primary axis, and always overlays the
+        basin-averaged rainfall as an inverted hyetograph on a twin top axis (the common
+        rainfall-runoff layout). Because ``.mrf`` files carry many variables whose names depend on
+        the run configuration, the column name(s) must be given explicitly.
+
+        Parameters
+        ----------
+        var : str or list of str
+            Column name(s) in the ``.mrf`` table to plot on the primary axis (e.g. ``"MDGW_mm"``).
+            A list draws several series on the same axis.
+        rainfall : str, optional
+            Column name of the basin-averaged rainfall plotted as the top hyetograph. Defaults to
+            ``"MAP_mm_hr"``. If the column is absent, the hyetograph is skipped with a warning.
+        start, end : str or datetime-like, optional
+            Restrict the plot to this window.
+        invert : bool, optional
+            Invert the primary y-axis. Useful for depth-like variables (e.g. depth to water table),
+            where increasing depth should point downward. Default ``False``.
+        ax : matplotlib.axes.Axes, optional
+            Primary axes to draw into. If ``None``, a new figure and axes are created.
+        saved_fig : str, optional
+            If provided, the figure is saved to this path.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The primary axes (``ax.figure.axes`` also exposes the rainfall twin axis).
+        """
+        if self.mrf.get('mrf') is None:
+            self.get_mrf_results()
+        mrf = self.mrf['mrf'].set_index('Time')
+
+        varlist = [var] if isinstance(var, str) else list(var)
+        missing = [v for v in varlist if v not in mrf.columns]
+        if missing:
+            raise ValueError(f"Column(s) {missing} not found in the mrf output. "
+                             f"Available columns: {list(mrf.columns)}")
+
+        mrf = mrf.loc[start:end]
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(12, 6))
+
+        for v in varlist:
+            ax.plot(mrf.index, mrf[v], linewidth=2, label=v)
+        ax.set_xlabel('Date')
+        ax.set_ylabel(varlist[0] if len(varlist) == 1 else 'Value')
+        if invert:
+            ax.invert_yaxis()
+
+        # Rainfall hyetograph on an inverted twin axis, scaled to the top ~third of the figure.
+        rain_handles, rain_labels = [], []
+        if rainfall in mrf.columns:
+            ax2 = ax.twinx()
+            bar_width = ((mrf.index[1] - mrf.index[0]).total_seconds() / 86400.0
+                         if len(mrf.index) > 1 else 0.02)
+            ax2.bar(mrf.index, mrf[rainfall], width=bar_width, color='#1f77b4', alpha=0.6,
+                    label='Rainfall')
+            ax2.set_ylabel('Rainfall (mm/hr)', color='#1f77b4')
+            ax2.tick_params(axis='y', labelcolor='#1f77b4')
+            max_rain = mrf[rainfall].max()
+            if max_rain and max_rain > 0:
+                ax2.set_ylim(max_rain * 3, 0)
+            rain_handles, rain_labels = ax2.get_legend_handles_labels()
+        elif rainfall is not None:
+            print(f"Warning: rainfall column '{rainfall}' not found in mrf; skipping hyetograph.")
+
+        var_handles, var_labels = ax.get_legend_handles_labels()
+        ax.legend(var_handles + rain_handles, var_labels + rain_labels, loc='center right')
+
+        locator = mdates.AutoDateLocator()
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        ax.grid(True, linestyle=':', alpha=0.7)
+
+        if saved_fig is not None:
+            ax.figure.savefig(saved_fig, bbox_inches='tight')
+
+        return ax
+
+    def plot_element(self, node_id, var, start=None, end=None, ax=None, saved_fig=None):
+        """
+        Quick-look plot of one or more variables from a single element's ``.pixel`` output.
+
+        Loads the per-node pixel results (if not already loaded) and plots the requested
+        variable(s) versus time for the given node. Because ``.pixel`` files carry many variables,
+        the column name(s) must be given explicitly. A list of variables is drawn as stacked,
+        x-aligned panels (one per variable).
+
+        Parameters
+        ----------
+        node_id : int
+            Node ID of the pixel to plot. Must be present in ``self.element``.
+        var : str or list of str
+            Column name(s) in the ``.pixel`` table (e.g. ``"Nwt_mm"``, ``"Rain_mm_h"``).
+        start, end : str or datetime-like, optional
+            Restrict the plot to this window.
+        ax : matplotlib.axes.Axes or list of Axes, optional
+            Axes to draw into. For a single variable, one ``Axes``; for a list of variables, a
+            matching list of stacked axes. If ``None``, axes are created.
+        saved_fig : str, optional
+            If provided, the figure is saved to this path.
+
+        Returns
+        -------
+        matplotlib.axes.Axes or tuple
+            For a single variable, the ``Axes``. For a list, ``(figure, axes)``.
+        """
+        if not self.element:
+            self.get_element_results()
+        if node_id not in self.element:
+            raise ValueError(f"Node {node_id} not found. Available nodes: "
+                             f"{sorted(self.element.keys())}")
+
+        pixel = self.element[node_id]['pixel'].set_index('Time')
+
+        single = isinstance(var, str)
+        varlist = [var] if single else list(var)
+        missing = [v for v in varlist if v not in pixel.columns]
+        if missing:
+            raise ValueError(f"Column(s) {missing} not found in pixel output for node {node_id}. "
+                             f"Available columns: {list(pixel.columns)}")
+
+        pixel = pixel.loc[start:end]
+
+        if ax is None:
+            _, axarr = plt.subplots(len(varlist), 1, figsize=(12, 3 * len(varlist)), sharex=True)
+            axes = list(np.atleast_1d(axarr))
+        else:
+            axes = list(np.atleast_1d(ax))
+            if len(axes) != len(varlist):
+                raise ValueError(f"Got {len(axes)} axes for {len(varlist)} variable(s).")
+
+        for a, v in zip(axes, varlist):
+            a.plot(pixel.index, pixel[v], linewidth=1, color='tab:blue')
+            a.set_ylabel(v)
+            a.grid(True, linestyle=':', alpha=0.7)
+
+        axes[0].set_title(f'Pixel results — Node {node_id}', fontweight='bold')
+        axes[-1].set_xlabel('Date')
+        locator = mdates.AutoDateLocator()
+        axes[-1].xaxis.set_major_locator(locator)
+        axes[-1].xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+
+        if saved_fig is not None:
+            axes[0].figure.savefig(saved_fig, bbox_inches='tight')
+
+        return axes[0] if single else (axes[0].figure, axes)
 
     def create_animation(self, outfile, df_dict, frames, var, fps=4, vlims=None, nan_color='gray',
                          nan_edge_color='red', cmap='viridis'):
