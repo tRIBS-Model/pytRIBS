@@ -496,61 +496,41 @@ class MetProcessor(Aux, InOut):
         list_dfs : list of pandas.DataFrame
             A list of DataFrames, each containing NLDAS-2 timeseries data with columns such as 'date', 'psurf',
             'wind_u', 'wind_v', 'temp', 'humidity', 'rsds', and 'prcp'.
-        station_coords : list of tuples
-            A list of tuples, each containing the (longitude, latitude, elevation) for each station.
-        prefix : str
-            Prefix for the output filenames.
-        met_path : str
-            Directory path where meteorological files will be saved.
-        precip_path : str
-            Directory path where precipitation files will be saved.
+        station_coords : list of lists
+            One ``[longitude, easting, latitude, northing, elevation]`` entry per station.
         gmt : int
-            GMT offset for the data.
-        utm_epsg : str
-            EPSG code for the UTM coordinate system.
+            GMT offset (hours) applied to each station's timestamps.
+        prefix : str, optional
+            Deprecated and unused; retained for backward compatibility. Output file names are
+            now ``met_NLDAS_{startYYYY}-{endYYYY}.mdf`` (or ``met_NLDAS_{n}_...`` when there is
+            more than one station) and the matching ``precip_*`` form.
+        met_path : str, optional
+            Output *.sdf path for the meteorological stations; the *.mdf files are written to its
+            directory. Defaults to the HYDROMETSTATIONS option.
+        precip_path : str, optional
+            Output *.sdf path for the precipitation stations; the *.mdf files are written to its
+            directory. Defaults to the GAUGESTATIONS option.
+        orig_begin, orig_end : str, optional
+            If both are given, each station's series is trimmed to this window after the GMT
+            offset is applied.
 
         Returns
         -------
         None
-            This function does not return anything. The transformed timeseries data and station details are written
-            to the specified output files.
+            The transformed timeseries and station descriptors are written to the output files
+            via the shared writer (:meth:`InOut._write_station_stream`).
 
         Notes
         -----
-        The function assumes that the input NLDAS-2 data is structured in a specific way and that the stations'
-        geographic coordinates (longitude, latitude) need to be converted to UTM coordinates using the provided EPSG code.
+        NLDAS-specific unit conversions (Pa->hPa, 10 m->2 m wind log-profile scaling,
+        specific-humidity->RH, K->degC) happen here, upstream of the shared writer; the writer
+        owns only the on-disk file format.
         """
 
-        if prefix is None and self.hydrometbasename['value'] is not None:
-            prefix = self.hydrometbasename['value']
-        else:
-            prefix = 'MetResults'
-
-        if met_path is None and self.hydrometstations['value'] is not None:
+        if met_path is None:
             met_path = self.hydrometstations['value']
-        else:
-            prefix = ''
-
-        if precip_path is None and self.gaugestations['value'] is not None:
+        if precip_path is None:
             precip_path = self.gaugestations['value']
-        else:
-            prefix = ''
-
-        try:
-            met_dir = os.path.dirname(met_path)
-        except:
-            met_dir = ''
-
-        try:
-            precip_dir = os.path.dirname(precip_path)
-        except:
-            precip_dir = ''
-
-        met_sdf_list = []
-        precip_sdf_list = []
-
-        # Hard coded params for writing
-        count = 1
 
         # Physical constants
         L = 2.453 * 10 ** 6  # Latent heat of vaporization (J/kg)
@@ -574,15 +554,28 @@ class MetProcessor(Aux, InOut):
         # Scaling factor = ln(z_dest / z0) / ln(z_meas / z0)
         wind_scale_factor = np.log((z_dest - d) / z0_ref) / np.log((z_meas - d) / z0_ref)
 
-        for df in list_dfs:
+        # Define rounding rules for each parameter
+        rounding_rules = {
+            'PA': 2,    # Pressure (hPa)
+            'RH': 2,    # Relative Humidity (%)
+            'US': 3,    # Wind Speed (m/s)
+            'TA': 2,    # Air Temperature (C)
+            'IS': 2,    # Incoming Shortwave Radiation (W/m^2)
+            'R': 4,     # Precipitation Rate (kg/m^2/s)
+            'VP': 3     # Vapor Pressure (hPa)
+        }
+
+        n_stations = len(list_dfs)
+        met_stations = []
+        precip_stations = []
+
+        for i, df in enumerate(list_dfs):
+            count = i + 1
+
             # Apply GMT offset to the index
             df.index = df.index + pd.to_timedelta(gmt, unit='h')
             if orig_begin and orig_end:
                 df = df.loc[orig_begin:orig_end].copy()
-
-            # Initialize dictionaries for station details
-            met_sdf = {'station_id': None, 'file_path': None, 'y': None, 'x': None, 'elevation': None}
-            precip_sdf = {'station_id': None, 'file_path': None, 'y': None, 'x': None, 'elevation': None}
 
             # Update to tRIBS variables
             df['XC'] = 9999.99
@@ -604,58 +597,28 @@ class MetProcessor(Aux, InOut):
             df['RH'] = 100 * (df['VP'] / df['e_sat'])
 
             df.rename(columns={'rsds': 'IS', 'prcp': 'R', 'psurf': 'PA'}, inplace=True)
-            
-            # Define rounding rules for each parameter
-            rounding_rules = {
-                'PA': 2,    # Pressure (hPa)
-                'RH': 2,    # Relative Humidity (%)
-                'US': 3,    # Wind Speed (m/s)
-                'TA': 2,    # Air Temperature (C)
-                'IS': 2,    # Incoming Shortwave Radiation (W/m^2)
-                'R': 4,     # Precipitation Rate (kg/m^2/s)
-                'VP': 3     # Vapor Pressure (hPa)
-            }
             df = df.round(rounding_rules)
 
             df['date'] = df.index.values
 
-            # Write out files with pytrib utility class InOut
-            precip_file = f'precip_{prefix}_{count}.mdf'
-            met_file = f'met_{prefix}_{count}.mdf'
-
-            precip_file_path = os.path.join(precip_dir, precip_file)
-            met_file_path = os.path.join(met_dir, met_file)
-
-            self.write_precip_station(df[['R', 'date']].copy(), precip_file_path)
-            self.write_met_station(df[['PA', 'RH', 'XC', 'TS', 'TA', 'US', 'IS', 'date']].copy(),
-                                    met_file_path)
-
-            # Update sdf dictionaries
-            met_sdf['station_id'] = count
-            precip_sdf['station_id'] = count
-            met_sdf['file_path'] = met_file_path
-            precip_sdf['file_path'] = precip_file_path
+            # Station label: the source is NLDAS; disambiguate when there is more than one.
+            label = 'NLDAS' if n_stations == 1 else f'NLDAS_{count}'
 
             # Geographic coordinates (UTM northing/easting) and elevation
-            y = station_coords[count - 1][3]
             x = station_coords[count - 1][1]
+            y = station_coords[count - 1][3]
             elevation = station_coords[count - 1][4]
 
-            met_sdf['x'] = x
-            met_sdf['y'] = y
-            precip_sdf['x'] = x
-            precip_sdf['y'] = y
+            coords = {'name': label, 'x': x, 'y': y, 'elevation': elevation}
+            met_stations.append(
+                {**coords, 'data': df[['PA', 'RH', 'XC', 'TS', 'TA', 'US', 'IS', 'date']].copy()})
+            precip_stations.append(
+                {**coords, 'data': df[['R', 'date']].copy()})
 
-            met_sdf['elevation'] = elevation
-            precip_sdf['elevation'] = elevation
-
-            met_sdf_list.append(met_sdf)
-            precip_sdf_list.append(precip_sdf)
-
-            count += 1
-
-        self.write_met_sdf(met_sdf_list, met_path)
-        self.write_precip_sdf(precip_sdf_list, precip_path)
+        # Hand off to the shared writer so the NLDAS and bring-your-own-data paths emit
+        # identical file formats from one place.
+        self._write_station_stream(met_stations, met_path, self.write_met_station, 'met')
+        self._write_station_stream(precip_stations, precip_path, self.write_precip_station, 'precip')
 
     def run_met_workflow(self, watershed, begin, end, elev=None):
         """
