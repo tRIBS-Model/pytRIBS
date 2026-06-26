@@ -620,6 +620,136 @@ class MetProcessor(Aux, InOut):
         self._write_station_stream(met_stations, met_path, self.write_met_station, 'met')
         self._write_station_stream(precip_stations, precip_path, self.write_precip_station, 'precip')
 
+    # Required tRIBS-named columns for user-provided observation DataFrames. The user owns units
+    # and rates (values must already be in tRIBS units); pytRIBS owns format, fills, and the .sdf.
+    # For met, XC (cloud cover) and TS (surface temperature) are auto-filled to 9999.99 by the
+    # writer and so are not required here.
+    MET_OBS_COLUMNS = ['date', 'PA', 'RH', 'US', 'TA', 'IS']
+    PRECIP_OBS_COLUMNS = ['date', 'R']
+
+    @staticmethod
+    def _validate_observation_stations(stations, required_cols, stream):
+        """
+        Validate user-supplied observation stations and return normalized copies ready for the
+        shared writer.
+
+        Common problems found across all stations is collected and reported together in a single
+        ValueError, rather than failing on the first one or writing partial output. The returned
+        copies leave the caller's DataFrames untouched and carry a 'date' column coerced to real
+        datetimes (the representation the writer expects).
+
+        :param stations: List of dicts, each ``{'name', 'x', 'y', 'elevation', 'data'}`` where
+            ``data`` is a DataFrame holding ``required_cols``.
+        :param required_cols: tRIBS-named columns the data must contain for this stream.
+        :param stream: Stream label ('met' or 'precip'), used in error messages.
+        :return: List of validated, normalized station dicts.
+        :raises ValueError: If ``stations`` is empty, names are not unique, or any station is
+            missing required keys/columns or has an unparseable 'date' column.
+        """
+        if not isinstance(stations, list) or len(stations) == 0:
+            raise ValueError(f"{stream} stations must be a non-empty list of station dicts.")
+
+        required_keys = ('name', 'x', 'y', 'elevation', 'data')
+        validated = []
+        errors = []
+        seen_names = {}
+
+        for idx, station in enumerate(stations):
+            if not isinstance(station, dict):
+                errors.append(f"station at position {idx}: expected a dict, "
+                              f"got {type(station).__name__}.")
+                continue
+
+            missing_keys = [k for k in required_keys if k not in station]
+            if missing_keys:
+                label = station.get('name', f'<position {idx}>')
+                errors.append(f"station {label}: missing keys {missing_keys}; "
+                              f"required: {list(required_keys)}.")
+                continue
+
+            name = station['name']
+            seen_names.setdefault(name, []).append(idx)
+
+            df = station['data']
+            if not isinstance(df, pd.DataFrame):
+                errors.append(f"station '{name}': 'data' must be a pandas DataFrame, "
+                              f"got {type(df).__name__}.")
+                continue
+
+            missing_cols = [c for c in required_cols if c not in df.columns]
+            if missing_cols:
+                errors.append(f"station '{name}': data missing required columns {missing_cols}; "
+                              f"required: {required_cols}.")
+                continue
+
+            # Coerce 'date' to real datetimes on a copy so user input is never mutated and the
+            # writer always receives the canonical representation.
+            df = df.copy()
+            try:
+                df['date'] = pd.to_datetime(df['date'])
+            except (ValueError, TypeError) as e:
+                errors.append(f"station '{name}': 'date' could not be parsed as datetimes ({e}).")
+                continue
+
+            validated.append({'name': name, 'x': station['x'], 'y': station['y'],
+                              'elevation': station['elevation'], 'data': df})
+
+        # Names must be unique: each maps to a distinct .mdf filename, so duplicates would
+        # silently overwrite one another.
+        duplicates = {n: ids for n, ids in seen_names.items() if len(ids) > 1}
+        if duplicates:
+            dup_str = ', '.join(f"'{n}' (positions {ids})" for n, ids in duplicates.items())
+            errors.append(f"station names must be unique; duplicates: {dup_str}.")
+
+        if errors:
+            raise ValueError(f"Invalid {stream} observation stations:\n  - "
+                             + "\n  - ".join(errors))
+
+        return validated
+
+    def write_met_from_observations(self, stations, sdf_path):
+        """
+        Write tRIBS meteorological forcing files (*.mdf + *.sdf) from user-supplied observational
+        time-series loaded into DataFrames.
+
+        Values must already be in tRIBS units (pytRIBS does no unit or humidity conversion here):
+        PA in mb, RH in %, US in m/s (~2 m), TA in degC, IS in W/m^2. XC (cloud cover) and TS
+        (surface temperature) are auto-filled to 9999.99 if absent. Sub-hourly data is supported
+        as multiple rows under the same hour. Coordinates must already be in the project EPSG /
+        mesh CRS (no reprojection).
+
+        :param stations: List of dicts, each ``{'name', 'x', 'y', 'elevation', 'data'}`` where
+            ``data`` is a DataFrame with a 'date' column plus ``PA``, ``RH``, ``US``, ``TA``,
+            ``IS``. ``name`` labels the output file and must be unique across the list; ``x``/``y``
+            are easting/northing and ``elevation`` is in metres.
+        :param sdf_path: Output *.sdf path; the *.mdf files are written to its directory using the
+            ``met_{name}_{startYYYY}-{endYYYY}.mdf`` convention.
+        :raises ValueError: If any station fails validation (see _validate_observation_stations).
+        """
+        stations = self._validate_observation_stations(stations, self.MET_OBS_COLUMNS, 'met')
+        self._write_station_stream(stations, sdf_path, self.write_met_station, 'met')
+
+    def write_precip_from_observations(self, stations, sdf_path):
+        """
+        Write tRIBS precipitation forcing files (*.mdf + *.sdf) from user-supplied observational
+        time-series loaded into DataFrames.
+
+        The rainfall column ``R`` must already be a rate in mm/hr (convert e.g. a 15-minute
+        accumulation to the mm/hr rate yourself). Sub-hourly data is supported as multiple rows
+        under the same hour. Coordinates must already be in the project EPSG / mesh CRS (no
+        reprojection).
+
+        :param stations: List of dicts, each ``{'name', 'x', 'y', 'elevation', 'data'}`` where
+            ``data`` is a DataFrame with a 'date' column plus ``R`` (mm/hr). ``name`` labels the
+            output file and must be unique across the list; ``x``/``y`` are easting/northing and
+            ``elevation`` is in metres.
+        :param sdf_path: Output *.sdf path; the *.mdf files are written to its directory using the
+            ``precip_{name}_{startYYYY}-{endYYYY}.mdf`` convention.
+        :raises ValueError: If any station fails validation (see _validate_observation_stations).
+        """
+        stations = self._validate_observation_stations(stations, self.PRECIP_OBS_COLUMNS, 'precip')
+        self._write_station_stream(stations, sdf_path, self.write_precip_station, 'precip')
+
     def run_met_workflow(self, watershed, begin, end, elev=None):
         """
         Execute the meteorological data workflow for a given watershed.
