@@ -496,61 +496,41 @@ class MetProcessor(Aux, InOut):
         list_dfs : list of pandas.DataFrame
             A list of DataFrames, each containing NLDAS-2 timeseries data with columns such as 'date', 'psurf',
             'wind_u', 'wind_v', 'temp', 'humidity', 'rsds', and 'prcp'.
-        station_coords : list of tuples
-            A list of tuples, each containing the (longitude, latitude, elevation) for each station.
-        prefix : str
-            Prefix for the output filenames.
-        met_path : str
-            Directory path where meteorological files will be saved.
-        precip_path : str
-            Directory path where precipitation files will be saved.
+        station_coords : list of lists
+            One ``[longitude, easting, latitude, northing, elevation]`` entry per station.
         gmt : int
-            GMT offset for the data.
-        utm_epsg : str
-            EPSG code for the UTM coordinate system.
+            GMT offset (hours) applied to each station's timestamps.
+        prefix : str, optional
+            Deprecated and unused; retained for backward compatibility. Output file names are
+            now ``met_NLDAS_{startYYYY}-{endYYYY}.mdf`` (or ``met_NLDAS_{n}_...`` when there is
+            more than one station) and the matching ``precip_*`` form.
+        met_path : str, optional
+            Output *.sdf path for the meteorological stations; the *.mdf files are written to its
+            directory. Defaults to the HYDROMETSTATIONS option.
+        precip_path : str, optional
+            Output *.sdf path for the precipitation stations; the *.mdf files are written to its
+            directory. Defaults to the GAUGESTATIONS option.
+        orig_begin, orig_end : str, optional
+            If both are given, each station's series is trimmed to this window after the GMT
+            offset is applied.
 
         Returns
         -------
         None
-            This function does not return anything. The transformed timeseries data and station details are written
-            to the specified output files.
+            The transformed timeseries and station descriptors are written to the output files
+            via the shared writer (:meth:`InOut._write_station_stream`).
 
         Notes
         -----
-        The function assumes that the input NLDAS-2 data is structured in a specific way and that the stations'
-        geographic coordinates (longitude, latitude) need to be converted to UTM coordinates using the provided EPSG code.
+        NLDAS-specific unit conversions (Pa->hPa, 10 m->2 m wind log-profile scaling,
+        specific-humidity->RH, K->degC) happen here, upstream of the shared writer; the writer
+        owns only the on-disk file format.
         """
 
-        if prefix is None and self.hydrometbasename['value'] is not None:
-            prefix = self.hydrometbasename['value']
-        else:
-            prefix = 'MetResults'
-
-        if met_path is None and self.hydrometstations['value'] is not None:
+        if met_path is None:
             met_path = self.hydrometstations['value']
-        else:
-            prefix = ''
-
-        if precip_path is None and self.gaugestations['value'] is not None:
+        if precip_path is None:
             precip_path = self.gaugestations['value']
-        else:
-            prefix = ''
-
-        try:
-            met_dir = os.path.dirname(met_path)
-        except:
-            met_dir = ''
-
-        try:
-            precip_dir = os.path.dirname(precip_path)
-        except:
-            precip_dir = ''
-
-        met_sdf_list = []
-        precip_sdf_list = []
-
-        # Hard coded params for writing
-        count = 1
 
         # Physical constants
         L = 2.453 * 10 ** 6  # Latent heat of vaporization (J/kg)
@@ -574,15 +554,28 @@ class MetProcessor(Aux, InOut):
         # Scaling factor = ln(z_dest / z0) / ln(z_meas / z0)
         wind_scale_factor = np.log((z_dest - d) / z0_ref) / np.log((z_meas - d) / z0_ref)
 
-        for df in list_dfs:
+        # Define rounding rules for each parameter
+        rounding_rules = {
+            'PA': 2,    # Pressure (hPa)
+            'RH': 2,    # Relative Humidity (%)
+            'US': 3,    # Wind Speed (m/s)
+            'TA': 2,    # Air Temperature (C)
+            'IS': 2,    # Incoming Shortwave Radiation (W/m^2)
+            'R': 4,     # Precipitation Rate (kg/m^2/s)
+            'VP': 3     # Vapor Pressure (hPa)
+        }
+
+        n_stations = len(list_dfs)
+        met_stations = []
+        precip_stations = []
+
+        for i, df in enumerate(list_dfs):
+            count = i + 1
+
             # Apply GMT offset to the index
             df.index = df.index + pd.to_timedelta(gmt, unit='h')
             if orig_begin and orig_end:
                 df = df.loc[orig_begin:orig_end].copy()
-
-            # Initialize dictionaries for station details
-            met_sdf = {'station_id': None, 'file_path': None, 'y': None, 'x': None, 'elevation': None}
-            precip_sdf = {'station_id': None, 'file_path': None, 'y': None, 'x': None, 'elevation': None}
 
             # Update to tRIBS variables
             df['XC'] = 9999.99
@@ -604,58 +597,158 @@ class MetProcessor(Aux, InOut):
             df['RH'] = 100 * (df['VP'] / df['e_sat'])
 
             df.rename(columns={'rsds': 'IS', 'prcp': 'R', 'psurf': 'PA'}, inplace=True)
-            
-            # Define rounding rules for each parameter
-            rounding_rules = {
-                'PA': 2,    # Pressure (hPa)
-                'RH': 2,    # Relative Humidity (%)
-                'US': 3,    # Wind Speed (m/s)
-                'TA': 2,    # Air Temperature (C)
-                'IS': 2,    # Incoming Shortwave Radiation (W/m^2)
-                'R': 4,     # Precipitation Rate (kg/m^2/s)
-                'VP': 3     # Vapor Pressure (hPa)
-            }
             df = df.round(rounding_rules)
 
             df['date'] = df.index.values
 
-            # Write out files with pytrib utility class InOut
-            precip_file = f'precip_{prefix}_{count}.mdf'
-            met_file = f'met_{prefix}_{count}.mdf'
-
-            precip_file_path = os.path.join(precip_dir, precip_file)
-            met_file_path = os.path.join(met_dir, met_file)
-
-            self.write_precip_station(df[['R', 'date']].copy(), precip_file_path)
-            self.write_met_station(df[['PA', 'RH', 'XC', 'TS', 'TA', 'US', 'IS', 'date']].copy(),
-                                    met_file_path)
-
-            # Update sdf dictionaries
-            met_sdf['station_id'] = count
-            precip_sdf['station_id'] = count
-            met_sdf['file_path'] = met_file_path
-            precip_sdf['file_path'] = precip_file_path
+            # Station label: the source is NLDAS; disambiguate when there is more than one.
+            label = 'NLDAS' if n_stations == 1 else f'NLDAS_{count}'
 
             # Geographic coordinates (UTM northing/easting) and elevation
-            y = station_coords[count - 1][3]
             x = station_coords[count - 1][1]
+            y = station_coords[count - 1][3]
             elevation = station_coords[count - 1][4]
 
-            met_sdf['x'] = x
-            met_sdf['y'] = y
-            precip_sdf['x'] = x
-            precip_sdf['y'] = y
+            coords = {'name': label, 'x': x, 'y': y, 'elevation': elevation}
+            met_stations.append(
+                {**coords, 'data': df[['PA', 'RH', 'XC', 'TS', 'TA', 'US', 'IS', 'date']].copy()})
+            precip_stations.append(
+                {**coords, 'data': df[['R', 'date']].copy()})
 
-            met_sdf['elevation'] = elevation
-            precip_sdf['elevation'] = elevation
+        # Hand off to the shared writer so the NLDAS and bring-your-own-data paths emit
+        # identical file formats from one place.
+        self._write_station_stream(met_stations, met_path, self.write_met_station, 'met')
+        self._write_station_stream(precip_stations, precip_path, self.write_precip_station, 'precip')
 
-            met_sdf_list.append(met_sdf)
-            precip_sdf_list.append(precip_sdf)
+    # Required tRIBS-named columns for user-provided observation DataFrames. The user owns units
+    # and rates (values must already be in tRIBS units); pytRIBS owns format, fills, and the .sdf.
+    # For met, XC (cloud cover) and TS (surface temperature) are auto-filled to 9999.99 by the
+    # writer and so are not required here.
+    MET_OBS_COLUMNS = ['date', 'PA', 'RH', 'US', 'TA', 'IS']
+    PRECIP_OBS_COLUMNS = ['date', 'R']
 
-            count += 1
+    @staticmethod
+    def _validate_observation_stations(stations, required_cols, stream):
+        """
+        Validate user-supplied observation stations and return normalized copies ready for the
+        shared writer.
 
-        self.write_met_sdf(met_sdf_list, met_path)
-        self.write_precip_sdf(precip_sdf_list, precip_path)
+        Common problems found across all stations is collected and reported together in a single
+        ValueError, rather than failing on the first one or writing partial output. The returned
+        copies leave the caller's DataFrames untouched and carry a 'date' column coerced to real
+        datetimes (the representation the writer expects).
+
+        :param stations: List of dicts, each ``{'name', 'x', 'y', 'elevation', 'data'}`` where
+            ``data`` is a DataFrame holding ``required_cols``.
+        :param required_cols: tRIBS-named columns the data must contain for this stream.
+        :param stream: Stream label ('met' or 'precip'), used in error messages.
+        :return: List of validated, normalized station dicts.
+        :raises ValueError: If ``stations`` is empty, names are not unique, or any station is
+            missing required keys/columns or has an unparseable 'date' column.
+        """
+        if not isinstance(stations, list) or len(stations) == 0:
+            raise ValueError(f"{stream} stations must be a non-empty list of station dicts.")
+
+        required_keys = ('name', 'x', 'y', 'elevation', 'data')
+        validated = []
+        errors = []
+        seen_names = {}
+
+        for idx, station in enumerate(stations):
+            if not isinstance(station, dict):
+                errors.append(f"station at position {idx}: expected a dict, "
+                              f"got {type(station).__name__}.")
+                continue
+
+            missing_keys = [k for k in required_keys if k not in station]
+            if missing_keys:
+                label = station.get('name', f'<position {idx}>')
+                errors.append(f"station {label}: missing keys {missing_keys}; "
+                              f"required: {list(required_keys)}.")
+                continue
+
+            name = station['name']
+            seen_names.setdefault(name, []).append(idx)
+
+            df = station['data']
+            if not isinstance(df, pd.DataFrame):
+                errors.append(f"station '{name}': 'data' must be a pandas DataFrame, "
+                              f"got {type(df).__name__}.")
+                continue
+
+            missing_cols = [c for c in required_cols if c not in df.columns]
+            if missing_cols:
+                errors.append(f"station '{name}': data missing required columns {missing_cols}; "
+                              f"required: {required_cols}.")
+                continue
+
+            # Coerce 'date' to real datetimes on a copy so user input is never mutated and the
+            # writer always receives the canonical representation.
+            df = df.copy()
+            try:
+                df['date'] = pd.to_datetime(df['date'])
+            except (ValueError, TypeError) as e:
+                errors.append(f"station '{name}': 'date' could not be parsed as datetimes ({e}).")
+                continue
+
+            validated.append({'name': name, 'x': station['x'], 'y': station['y'],
+                              'elevation': station['elevation'], 'data': df})
+
+        # Names must be unique: each maps to a distinct .mdf filename, so duplicates would
+        # silently overwrite one another.
+        duplicates = {n: ids for n, ids in seen_names.items() if len(ids) > 1}
+        if duplicates:
+            dup_str = ', '.join(f"'{n}' (positions {ids})" for n, ids in duplicates.items())
+            errors.append(f"station names must be unique; duplicates: {dup_str}.")
+
+        if errors:
+            raise ValueError(f"Invalid {stream} observation stations:\n  - "
+                             + "\n  - ".join(errors))
+
+        return validated
+
+    def write_met_from_observations(self, stations, sdf_path):
+        """
+        Write tRIBS meteorological forcing files (*.mdf + *.sdf) from user-supplied observational
+        time-series loaded into DataFrames.
+
+        Values must already be in tRIBS units (pytRIBS does no unit or humidity conversion here):
+        PA in mb, RH in %, US in m/s (~2 m), TA in degC, IS in W/m^2. XC (cloud cover) and TS
+        (surface temperature) are auto-filled to 9999.99 if absent. Sub-hourly data is supported
+        as multiple rows under the same hour. Coordinates must already be in the project EPSG /
+        mesh CRS (no reprojection).
+
+        :param stations: List of dicts, each ``{'name', 'x', 'y', 'elevation', 'data'}`` where
+            ``data`` is a DataFrame with a 'date' column plus ``PA``, ``RH``, ``US``, ``TA``,
+            ``IS``. ``name`` labels the output file and must be unique across the list; ``x``/``y``
+            are easting/northing and ``elevation`` is in metres.
+        :param sdf_path: Output *.sdf path; the *.mdf files are written to its directory using the
+            ``met_{name}_{startYYYY}-{endYYYY}.mdf`` convention.
+        :raises ValueError: If any station fails validation (see _validate_observation_stations).
+        """
+        stations = self._validate_observation_stations(stations, self.MET_OBS_COLUMNS, 'met')
+        self._write_station_stream(stations, sdf_path, self.write_met_station, 'met')
+
+    def write_precip_from_observations(self, stations, sdf_path):
+        """
+        Write tRIBS precipitation forcing files (*.mdf + *.sdf) from user-supplied observational
+        time-series loaded into DataFrames.
+
+        The rainfall column ``R`` must already be a rate in mm/hr (convert e.g. a 15-minute
+        accumulation to the mm/hr rate yourself). Sub-hourly data is supported as multiple rows
+        under the same hour. Coordinates must already be in the project EPSG / mesh CRS (no
+        reprojection).
+
+        :param stations: List of dicts, each ``{'name', 'x', 'y', 'elevation', 'data'}`` where
+            ``data`` is a DataFrame with a 'date' column plus ``R`` (mm/hr). ``name`` labels the
+            output file and must be unique across the list; ``x``/``y`` are easting/northing and
+            ``elevation`` is in metres.
+        :param sdf_path: Output *.sdf path; the *.mdf files are written to its directory using the
+            ``precip_{name}_{startYYYY}-{endYYYY}.mdf`` convention.
+        :raises ValueError: If any station fails validation (see _validate_observation_stations).
+        """
+        stations = self._validate_observation_stations(stations, self.PRECIP_OBS_COLUMNS, 'precip')
+        self._write_station_stream(stations, sdf_path, self.write_precip_station, 'precip')
 
     def run_met_workflow(self, watershed, begin, end, elev=None):
         """

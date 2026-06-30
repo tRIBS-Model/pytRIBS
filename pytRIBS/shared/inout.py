@@ -691,6 +691,50 @@ class InOut:
                            f"{station['y']},{station['x']},{station['elevation']}\n")
 
     @staticmethod
+    def _write_station_stream(stations, sdf_path, station_writer, stream):
+        """
+        Shared core for writing a single forcing stream (met or precip): for each station,
+        write its data file (*.mdf) and collect a station descriptor entry, then write the
+        *.sdf. This is the single place that owns the on-disk file layout, so the NLDAS
+        download path and the user-provided-observation path produce identical formats.
+
+        Station IDs written to the *.sdf are assigned as integers starting at 1
+        (tRIBS-internal). Each *.mdf is named ``{stream}_{name}_{startYYYY}-{endYYYY}.mdf``,
+        where the year window is derived from the station's data and ``name`` is the station
+        label supplied by the caller.
+
+        :param stations: List of dicts, each ``{'name', 'x', 'y', 'elevation', 'data'}`` where
+            ``data`` is a DataFrame with a datetime 'date' column and the stream's variables.
+            Names must be unique across the list (each maps to a distinct *.mdf filename).
+        :param sdf_path: Output *.sdf path; the *.mdf files are written to its directory.
+        :param station_writer: Per-stream *.mdf writer, e.g. ``InOut.write_met_station`` or
+            ``InOut.write_precip_station``.
+        :param stream: Stream label used in the *.mdf filename, e.g. 'met' or 'precip'.
+        """
+        out_dir = os.path.dirname(sdf_path)
+        sdf_list = []
+
+        for station_id, station in enumerate(stations, start=1):
+            df = station['data']
+            start_year = df['date'].dt.year.min()
+            end_year = df['date'].dt.year.max()
+            mdf_name = f"{stream}_{station['name']}_{start_year}-{end_year}.mdf"
+            mdf_path = os.path.join(out_dir, mdf_name)
+
+            # Copy so the per-stream writer never mutates the caller's DataFrame.
+            station_writer(df.copy(), mdf_path)
+
+            sdf_list.append({
+                'station_id': station_id,
+                'file_path': mdf_path,
+                'y': station['y'],
+                'x': station['x'],
+                'elevation': station['elevation'],
+            })
+
+        InOut.write_sdf(sdf_list, sdf_path)
+
+    @staticmethod
     def write_precip_sdf(station_list, output_file_path):
         """
         Writes a list of precip stations to a *.sdf file. See write_sdf for the file format.
