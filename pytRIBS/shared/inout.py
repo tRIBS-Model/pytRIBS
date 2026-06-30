@@ -263,6 +263,131 @@ class InOut:
         )
         print(f"  Wrote {len(polys)} triangles, {len(pts)} nodes, {len(edge_lines)} edges.")
 
+    @staticmethod
+    def _read_tribs_list(filepath):
+        """Read a tRIBS list file (header float, count, then ``count`` data rows).
+
+        Returns ``(count, data_lines)`` where ``data_lines`` is a list of the
+        non-empty data rows (header and count lines stripped).
+        """
+        with open(filepath) as f:
+            lines = [ln.strip() for ln in f if ln.strip() != ""]
+        if len(lines) < 2:
+            raise ValueError(f"{filepath} is too short to be a tRIBS list file.")
+        count = int(float(lines[1]))      # lines[0] is a header float, lines[1] the count
+        data = lines[2:2 + count]
+        if len(data) != count:
+            raise ValueError(
+                f"{filepath}: header declares {count} rows but found {len(data)}."
+            )
+        return count, data
+
+    @staticmethod
+    def read_mesh_files(prefix, path=""):
+        """
+        Read the four tRIBS mesh files (``.nodes``/``.z``/``.tri``/``.edges``) back into arrays.
+
+        This is the inverse of :meth:`write_mesh_files`: it parses the on-disk mesh
+        that tRIBS reads under ``OPTMESHINPUT`` = 1, so the actual mesh can be
+        inspected or validated independently of how it was generated.
+
+        Parameters
+        ----------
+        prefix : str
+            Base name of the four files (without extension).
+        path : str, optional
+            Directory prefix prepended to ``prefix`` (include a trailing separator,
+            e.g. ``'data/model/mesh/'``). Default ``''``.
+
+        Returns
+        -------
+        dict
+            ``vertices`` (nnodes, 3) x, y, z; ``triangles`` (ntri, 3) node indices;
+            ``node_codes`` (nnodes,) boundary codes (0=interior, 1=closed boundary,
+            2=outlet, 3=stream); ``node_edgid`` (nnodes,) the node's first spoke edge
+            id; and ``edges`` (nedges, 3) directed ``[origin, dest, nextid]`` rows.
+        """
+        base = f"{path}{prefix}"
+        _, node_lines = InOut._read_tribs_list(base + ".nodes")
+        _, z_lines = InOut._read_tribs_list(base + ".z")
+        _, tri_lines = InOut._read_tribs_list(base + ".tri")
+        _, edge_lines = InOut._read_tribs_list(base + ".edges")
+
+        node_tok = [ln.split() for ln in node_lines]
+        xy = np.array([[float(t[0]), float(t[1])] for t in node_tok])
+        node_edgid = np.array([int(t[2]) for t in node_tok])
+        node_codes = np.array([int(t[3]) for t in node_tok])
+        z = np.array([float(ln.split()[0]) for ln in z_lines])
+
+        if not (len(xy) == len(z)):
+            raise ValueError(
+                f"Node/elevation count mismatch: {len(xy)} nodes vs {len(z)} elevations."
+            )
+
+        vertices = np.column_stack([xy, z])
+        triangles = np.array([[int(v) for v in ln.split()[:3]] for ln in tri_lines])
+        edges = np.array([[int(v) for v in ln.split()[:3]] for ln in edge_lines])
+
+        print(f"  Read mesh '{base}': {len(vertices)} nodes, {len(triangles)} triangles, "
+              f"{len(edges)} directed edges.")
+        return {"vertices": vertices, "triangles": triangles,
+                "node_codes": node_codes, "node_edgid": node_edgid, "edges": edges}
+
+    @staticmethod
+    def read_reach_file(reach_path, crs=None, output_shp=None):
+        """
+        Read a tRIBS ``{OUTFILENAME}_reach`` file into stream-reach line geometries.
+
+        ``DeriveStreamReaches`` writes this file (ArcInfo "generate" line format) after
+        tRIBS has built the channel network via ``WeightedShortestPath`` -- so it is the
+        authoritative record of the stream reaches tRIBS actually routed on, head to
+        outlet. Each reach is a run of ``x,y`` vertices terminated by ``END``.
+
+        Parameters
+        ----------
+        reach_path : str
+            Path to the ``*_reach`` file produced by a tRIBS run.
+        crs : optional
+            CRS for the returned/written geometries (e.g. ``f"EPSG:{proj.meta['EPSG']}"``).
+        output_shp : str, optional
+            If given, also write the reaches to this shapefile.
+
+        Returns
+        -------
+        geopandas.GeoDataFrame
+            One ``LineString`` per reach, with a ``reach_id`` column.
+        """
+        reaches, coords, rid = [], [], None
+        with open(reach_path) as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    continue
+                if line.upper() == "END":
+                    if coords:
+                        reaches.append((rid, coords)); coords = []; rid = None
+                    continue
+                if "," in line:
+                    xs, ys = line.split(",")[:2]
+                    coords.append((float(xs), float(ys)))
+                else:
+                    rid = int(float(line))   # bare integer => new reach id
+
+        geoms, ids, skipped = [], [], 0
+        for rid, coords in reaches:
+            if len(coords) >= 2:
+                geoms.append(LineString(coords)); ids.append(rid)
+            else:
+                skipped += 1
+        gdf = gpd.GeoDataFrame({"reach_id": ids}, geometry=geoms, crs=crs)
+        print(f"  Read {len(geoms)} reaches from {reach_path}"
+              + (f" ({skipped} single-point reaches skipped)" if skipped else ""))
+        if output_shp is not None:
+            gdf.to_file(output_shp, driver="ESRI Shapefile")
+            print(f"  Wrote {output_shp}")
+        return gdf
+
+
     def write_input_file(self, output_file_path):
         """
         Writes .in file for tRIBS model simulation, organized into sections
