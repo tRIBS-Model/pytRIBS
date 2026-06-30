@@ -898,6 +898,24 @@ class GenerateMesh:
             self.bounds = src.bounds
             self.width = src.width
             self.height = src.height
+            nodata = src.nodata
+
+        # Build a nodata-free copy for the wavelet/feature analysis. Nodata cells (often
+        # a large sentinel such as -999999) otherwise create an enormous terrain->nodata
+        # "cliff" that dominates the significance normalization, hiding all real interior
+        # relief and forcing every significant point onto the data edge (the watershed
+        # boundary). self.data is left raw for display/elevation reference.
+        self.data_filled = self.data.astype(float)
+        invalid = ~np.isfinite(self.data_filled)
+        if nodata is not None:
+            invalid |= (self.data_filled == nodata)
+        if invalid.all():
+            raise ValueError(f"DEM '{self.raster}' contains no valid data.")
+        if invalid.any():
+            # Replace each nodata cell with its nearest valid value (no artificial cliff)
+            idx = ndimage.distance_transform_edt(invalid, return_distances=False,
+                                                 return_indices=True)
+            self.data_filled = self.data_filled[tuple(idx)]
 
         cols = np.arange(self.width)
         rows = np.arange(self.height)
@@ -913,7 +931,7 @@ class GenerateMesh:
         if self.transform[4] > 0:
             self.y_grid = np.flipud(self.y_grid)
 
-        self.wavelet_packet = pywt.WaveletPacket2D(data=self.data, wavelet='db1',
+        self.wavelet_packet = pywt.WaveletPacket2D(data=self.data_filled, wavelet='db1',
                                                    maxlevel=self.maxlevel)
         # update maxlevel incase it's none
         self.maxlevel = self.wavelet_packet.maxlevel
@@ -1241,8 +1259,9 @@ class GenerateMesh:
             row_end = min(row_end, self.height)
             col_end = min(col_end, self.width)
 
-            # Extract DEM data and coordinate grids within the cell
-            dem_cell = self.data[row_start:row_end, col_start:col_end]
+            # Extract DEM data and coordinate grids within the cell (nodata-filled, so
+            # the feature location is not pulled to a terrain->nodata edge)
+            dem_cell = self.data_filled[row_start:row_end, col_start:col_end]
             x_cell = self.x_grid[row_start:row_end, col_start:col_end]
             y_cell = self.y_grid[row_start:row_end, col_start:col_end]
 
@@ -1387,7 +1406,7 @@ class GenerateMesh:
         x = np.arange(width) * self.transform[0] + self.transform[2]
         y = np.arange(height) * self.transform[4] + self.transform[5]
 
-        interpolator = RegularGridInterpolator((y, x), self.data, method='linear', bounds_error=False,
+        interpolator = RegularGridInterpolator((y, x), self.data_filled, method='linear', bounds_error=False,
                                                fill_value=None)
 
         elevations = interpolator((points[:, 1], points[:, 0]))
