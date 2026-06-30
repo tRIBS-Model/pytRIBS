@@ -1673,13 +1673,11 @@ class MeshFromPSLG:
         hardcoded. Default ``'q10'``. See
         https://www.cs.cmu.edu/~quake/triangle.switch.html.
     separate_parallel_streams : bool, optional
-        Insert interior separator nodes between distinct stream branches that run
-        close together but join only far downstream, so the triangulation cannot
-        bridge them and tRIBS (``WeightedShortestPath``) does not merge them
+        After triangulating, find TIN edges that directly bridge distinct stream
+        branches which only join far downstream, insert interior separator nodes to
+        break them, and re-triangulate (repeated up to ``MAX_SEPARATOR_PASSES``). This
+        stops tRIBS (``WeightedShortestPath``) from merging parallel branches
         prematurely. Default True.
-    parallel_merge_dist : float, optional
-        Distance (m) below which two stream nodes are candidates for a separator.
-        Defaults to ``stream_point_spacing``.
 
     Attributes
     ----------
@@ -1706,15 +1704,20 @@ class MeshFromPSLG:
     INTERIOR_REMOVE_RADIUS = 5.0    # m: thin interior points closer than this
     MIN_STREAM_GRADIENT = 0.001     # minimum enforced stream slope (1 mm/m)
     STEINER_TOL = 0.1               # m: tolerance for snapping Steiner codes to PSLG
-    PARALLEL_GRAPH_FACTOR = 3.0     # a close stream-node pair whose along-network
-                                    #   distance exceeds this many node spacings is
-                                    #   treated as a parallel approach, not a confluence
+    PARALLEL_GRAPH_FACTOR = 3.0     # a TIN-adjacent stream-node pair whose along-network
+                                    #   distance exceeds this many node spacings is a
+                                    #   premature merge, not a confluence edge
+    SEPARATOR_MAX_EDGE_FACTOR = 2.0 # only separate cross-edges shorter than this many
+                                    #   node spacings (a narrow corridor a missing node
+                                    #   would fill); longer edges across open ground are
+                                    #   an interior-density problem, not a merge to break
+    MAX_SEPARATOR_PASSES = 6        # cap on triangulate->separate->re-triangulate passes
 
     def __init__(self, interior_points, watershed, stream_network, dem_file,
                  outlet=None, boundary_buffer_dist=30.0, boundary_spacing=50.0,
                  stream_point_spacing=25.0, stream_clearance_radius=2.0,
                  mesh_quality_opts='q10',
-                 separate_parallel_streams=True, parallel_merge_dist=None):
+                 separate_parallel_streams=True):
 
         self.interior_points = self._coerce_interior_points(interior_points)
         self.watershed_geom = self._coerce_geometry(watershed)
@@ -1728,7 +1731,6 @@ class MeshFromPSLG:
         self.stream_clearance_radius = stream_clearance_radius
         self.mesh_quality_opts = mesh_quality_opts
         self.separate_parallel_streams = separate_parallel_streams
-        self.parallel_merge_dist = parallel_merge_dist
 
         # Outputs populated by generate()
         self.vertices = None
@@ -1793,47 +1795,87 @@ class MeshFromPSLG:
         bnd_pts, bnd_codes = self._build_boundary()
         stream_nodes_xy, stream_segments_local, unified_stream_geom, \
             stream_outlet_xy, outlet_bnd_local_idx = self._build_stream_network(bnd_pts, bnd_codes)
-        all_interior = self._prepare_interior_points(unified_stream_geom)
+        # Clear interior points against the *resampled* stream segments (the straight
+        # chords the triangulation actually constrains), unioned with the original
+        # curved lines. An interior point in a chord-vs-bend gap is far from the curved
+        # line yet can sit on a resampled chord, forming a near-zero-area sliver whose
+        # circumcenter -- a Voronoi vertex in tRIBS -- flies far outside the domain and
+        # breaks soil/land-use resampling.
+        if stream_segments_local:
+            resampled_stream_geom = unary_union(
+                [LineString([stream_nodes_xy[i], stream_nodes_xy[j]])
+                 for i, j in stream_segments_local])
+            clearance_geom = unary_union([unified_stream_geom, resampled_stream_geom])
+        else:
+            clearance_geom = unified_stream_geom
+        all_interior = self._prepare_interior_points(clearance_geom)
 
-        # Step 3b: keep closely-spaced parallel stream branches from merging early
-        if self.separate_parallel_streams:
-            print("\nStep 3b: Separating closely-spaced parallel stream branches...")
-            seps = self._build_stream_separators(stream_nodes_xy, stream_segments_local)
-            if len(seps):
-                sep_df = pd.DataFrame({'x': seps[:, 0], 'y': seps[:, 1], 'code': 0})
-                all_interior = pd.concat([all_interior, sep_df], ignore_index=True)
+        # Inner boundary ring: evenly-spaced code-0 nodes along the divide so the
+        # outermost simulated Voronoi cells form a smooth band, independent of the
+        # wavelet interior-point density. Stream-cleared like other interior points,
+        # and thinned where wavelet points already sit nearby.
+        inner_ring = self._build_inner_boundary()
+        if len(inner_ring) and self.stream_clearance_radius > 0:
+            ring_gs = gpd.GeoSeries.from_xy(inner_ring[:, 0], inner_ring[:, 1])
+            inner_ring = inner_ring[
+                (ring_gs.distance(clearance_geom) >= self.stream_clearance_radius).values]
+        if len(inner_ring) and len(all_interior):
+            d, _ = cKDTree(all_interior[['x', 'y']].values).query(inner_ring)
+            inner_ring = inner_ring[d > self.INTERIOR_REMOVE_RADIUS]
+        if len(inner_ring):
+            ring_df = pd.DataFrame({'x': inner_ring[:, 0], 'y': inner_ring[:, 1], 'code': 0})
+            all_interior = pd.concat([all_interior, ring_df], ignore_index=True)
 
-        # Step 4: combine points (boundary first, then interior, then stream) and sample z
-        print("\nStep 4: Combining points and sampling elevations from DEM...")
-        bnd_df = pd.DataFrame({'x': bnd_pts[:, 0], 'y': bnd_pts[:, 1], 'code': bnd_codes})
-        # Boundary nodes first: their row indices (0..n_bnd-1) are stable in final_input_df
-        final_non_stream_pts = pd.concat([bnd_df, all_interior], ignore_index=True)
-        n_non_stream = len(final_non_stream_pts)
-
-        stream_nodes_df = pd.DataFrame(stream_nodes_xy, columns=['x', 'y'])
-        stream_nodes_df['code'] = 3
-        final_input_df = pd.concat([final_non_stream_pts, stream_nodes_df], ignore_index=True)
-        all_xy = final_input_df[['x', 'y']].values
-        final_input_df['z'] = self._sample_elevations(all_xy)
-
-        # Step 5: PSLG segments
-        print("\nStep 5: Defining mesh constraints...")
+        # Constant parts of the PSLG (independent of separator insertion)
         n_bnd = len(bnd_pts)
         boundary_segs = [(i, (i + 1) % n_bnd) for i in range(n_bnd)]
-        stream_segs = [(i + n_non_stream, j + n_non_stream) for i, j in stream_segments_local]
+        bnd_df = pd.DataFrame({'x': bnd_pts[:, 0], 'y': bnd_pts[:, 1], 'code': bnd_codes})
+        # Outlet reach connects this preserved stream endpoint to the boundary outlet node
+        _, stream_outlet_local_idx = cKDTree(stream_nodes_xy).query(stream_outlet_xy)
+        stream_outlet_local_idx = int(stream_outlet_local_idx)
 
-        # Outlet reach: 2-node segment connecting the stream outlet to the buffered
-        # boundary outlet node. stream_outlet_xy is a preserved stream endpoint.
-        stream_kdt = cKDTree(stream_nodes_xy)
-        _, stream_outlet_local_idx = stream_kdt.query(stream_outlet_xy)
-        stream_outlet_global_idx = int(stream_outlet_local_idx) + n_non_stream
-        outlet_reach_seg = (outlet_bnd_local_idx, stream_outlet_global_idx)
+        # Steps 4-6: assemble points (boundary, interior, then stream), build the PSLG
+        # segments, and triangulate. With separate_parallel_streams on, repeat: after
+        # each triangulation find any TIN edge that directly bridges two
+        # topologically-distant stream nodes (a premature merge), drop an interior
+        # separator node on its midpoint, and re-triangulate. The midpoint lies on the
+        # offending edge so the constrained Delaunay cannot re-form it.
+        print("\nStep 4-6: Combining points, defining constraints, and triangulating...")
+        sep_pass = 0
+        while True:
+            final_non_stream_pts = pd.concat([bnd_df, all_interior], ignore_index=True)
+            n_non_stream = len(final_non_stream_pts)  # boundary rows stay at 0..n_bnd-1
+            stream_nodes_df = pd.DataFrame(stream_nodes_xy, columns=['x', 'y'])
+            stream_nodes_df['code'] = 3
+            final_input_df = pd.concat([final_non_stream_pts, stream_nodes_df], ignore_index=True)
+            all_xy = final_input_df[['x', 'y']].values
 
-        all_segs = set(tuple(sorted(s)) for s in boundary_segs + stream_segs + [outlet_reach_seg])
-        segments = [list(s) for s in all_segs]
+            stream_segs = [(i + n_non_stream, j + n_non_stream) for i, j in stream_segments_local]
+            outlet_reach_seg = (outlet_bnd_local_idx, stream_outlet_local_idx + n_non_stream)
+            all_segs = set(tuple(sorted(s)) for s in boundary_segs + stream_segs + [outlet_reach_seg])
+            segments = [list(s) for s in all_segs]
 
-        # Step 6: triangulate
-        mesh_vertices_xy, triangles = self._triangulate(all_xy, segments)
+            mesh_vertices_xy, triangles = self._triangulate(all_xy, segments)
+
+            if not self.separate_parallel_streams:
+                break
+            new_seps = self._detect_stream_merge_separators(
+                mesh_vertices_xy, triangles, stream_nodes_xy, stream_segments_local,
+                all_interior[['x', 'y']].values if len(all_interior) else np.empty((0, 2)))
+            if not len(new_seps):
+                if sep_pass:
+                    print(f"  Premature stream merges resolved after {sep_pass} pass(es).")
+                break
+            sep_pass += 1
+            if sep_pass > self.MAX_SEPARATOR_PASSES:
+                print(f"  WARNING: {len(new_seps)} premature stream merge(s) remain after "
+                      f"{self.MAX_SEPARATOR_PASSES} passes; leaving them. A finer "
+                      f"stream_point_spacing may help if they matter.")
+                break
+            print(f"  Pass {sep_pass}: inserting {len(new_seps)} separator node(s) and "
+                  f"re-triangulating.")
+            sep_df = pd.DataFrame({'x': new_seps[:, 0], 'y': new_seps[:, 1], 'code': 0})
+            all_interior = pd.concat([all_interior, sep_df], ignore_index=True)
 
         # Step 7: elevations for all (incl. Steiner) vertices
         print("\nStep 7: Assigning elevations to mesh vertices...")
@@ -1900,6 +1942,25 @@ class MeshFromPSLG:
         print(f"  {n_bnd} boundary nodes at ~{self.boundary_spacing}m spacing "
               f"(buffer={self.boundary_buffer_dist}m)")
         return bnd_pts, bnd_codes
+
+    def _build_inner_boundary(self):
+        """Inner ring of interior (code-0) nodes following the watershed divide at
+        boundary_spacing.
+
+        The simulated domain edge is the outer edge of the code-0/3 Voronoi cells, 
+        so without evenly-spaced nodes along the divide the outermost cells are large 
+        and ragged. This lays down a uniform ring just inside the boundary so those 
+        cells form a smooth band. Mirrors the buffered outer ring at the same spacing.
+        """
+        ext = self.watershed_geom.exterior
+        n = max(3, int(round(ext.length / self.boundary_spacing)))
+        pts = np.array([
+            [ext.interpolate(i / n, normalized=True).x,
+             ext.interpolate(i / n, normalized=True).y]
+            for i in range(n)
+        ])
+        print(f"  {n} inner boundary nodes at ~{self.boundary_spacing}m spacing")
+        return pts
 
     def _build_stream_network(self, bnd_pts, bnd_codes):
         """Step 2: node the stream network, locate the outlet, resample, build the PSLG.
@@ -2076,79 +2137,110 @@ class MeshFromPSLG:
         """
         return interior_pts
 
-    def _build_stream_separators(self, stream_nodes_xy, stream_segments_local):
-        """Insert interior separator nodes between distinct, closely-spaced stream
-        branches so the triangulation cannot create a direct stream-to-stream edge
-        across the gap.
+    def _detect_stream_merge_separators(self, mesh_vertices_xy, triangles,
+                                        stream_nodes_xy, stream_segments_local,
+                                        existing_interior_xy):
+        """Find TIN edges that directly bridge topologically-distant stream nodes and
+        return midpoint separator coordinates to break them on re-triangulation.
 
         tRIBS rebuilds the channel network in ``tFlowNet::WeightedShortestPath`` by
-        connecting stream nodes through stream-to-stream TIN edges. Two separate
-        branches therefore merge prematurely whenever a node on one is directly
-        triangle-adjacent to a node on the other, which can happen when the
-        corridor between the 2 stream nodes holds no interior nodes.
-        Placing an interior (code-0) node on the midpoint of each such close,
-        topologically-distant node pair splits that edge (the midpoint lies on it),
-        and because ``WeightedShortestPath`` skips code-0 nodes the two branches can
-        only join at their genuine downstream confluence.
-
-        Pairs that are close *and* near each other along the stream network are
-        confluence neighbours and are left alone; only pairs whose along-network
-        distance greatly exceeds their straight-line distance (or that lie in
-        different network components) get a separator.
+        connecting stream nodes through *direct* stream-to-stream TIN edges, so two
+        separate branches merge prematurely exactly when such an edge spans them. This
+        inspects the actual triangulation (not a distance proxy): for every TIN edge
+        whose endpoints are both stream nodes, if the two are far apart along the
+        stream network, more than ``PARALLEL_GRAPH_FACTOR`` node spacings, or
+        unreachable (different components), then the edge is a premature merge. A
+        separator placed on its midpoint lies on the edge, so the constrained Delaunay
+        cannot re-form it; being code-0 it is invisible to ``WeightedShortestPath``,
+        forcing the branches to join only at their real confluence.
 
         Returns an (M, 2) array of separator x, y coordinates (possibly empty).
         """
-        P = np.asarray(stream_nodes_xy, float)
-        n = len(P)
-        if n < 2 or not stream_segments_local:
+        S = np.asarray(stream_nodes_xy, float)
+        n_s = len(S)
+        if n_s < 2 or not stream_segments_local:
             return np.empty((0, 2), float)
 
-        thresh = float(self.parallel_merge_dist or 1.5 * self.stream_point_spacing)
-        pairs = cKDTree(P).query_pairs(r=thresh)
-        if not pairs:
+        # Map each stream node to its mesh vertex (positions preserved by the YY switch)
+        _, stream_mesh_idx = cKDTree(mesh_vertices_xy).query(S)
+        mesh_to_stream = {int(m): i for i, m in enumerate(stream_mesh_idx)}
+
+        # Unique TIN edges whose endpoints are both stream nodes. Only short edges are
+        # considered: a separator fixes a narrow corridor that a missing interior node
+        # would otherwise occupy. Long stream-to-stream edges span open ground (too few
+        # interior nodes).
+        max_edge = self.SEPARATOR_MAX_EDGE_FACTOR * self.stream_point_spacing
+        seen, cand = set(), []
+        for t in triangles:
+            for k in range(3):
+                a = mesh_to_stream.get(int(t[k]))
+                b = mesh_to_stream.get(int(t[(k + 1) % 3]))
+                if a is None or b is None or a == b:
+                    continue
+                if np.linalg.norm(S[a] - S[b]) > max_edge:
+                    continue
+                key = (a, b) if a < b else (b, a)
+                if key not in seen:
+                    seen.add(key); cand.append(key)
+        if not cand:
             return np.empty((0, 2), float)
 
-        # Weighted stream graph for along-network (geodesic) distances
+        # Along-network distances for the stream nodes involved
         rows, cols, wts = [], [], []
         for i, j in stream_segments_local:
-            d = float(np.linalg.norm(P[i] - P[j]))
+            d = float(np.linalg.norm(S[i] - S[j]))
             rows += [i, j]; cols += [j, i]; wts += [d, d]
-        graph = csr_matrix((wts, (rows, cols)), shape=(n, n))
+        graph = csr_matrix((wts, (rows, cols)), shape=(n_s, n_s))
+        srcs = sorted({a for a, _ in cand})
+        src_row = {s: r for r, s in enumerate(srcs)}
+        gdist = dijkstra(graph, directed=False, indices=srcs)
 
-        src_list = sorted({a for pair in pairs for a in pair})
-        src_row = {s: k for k, s in enumerate(src_list)}
-        gdist = dijkstra(graph, directed=False, indices=src_list)
-
-        # Candidate pairs are already spatially close (within `thresh`); a pair is a
-        # parallel approach -- not a confluence neighbour -- when getting from one to
-        # the other *along the network* takes much farther than that, or is impossible
-        # (different network components, e.g. before the outlet reach is added).
         graph_sep = self.PARALLEL_GRAPH_FACTOR * self.stream_point_spacing
-        seps = []
-        for i, j in pairs:
-            gd = gdist[src_row[i], j]
-            if not np.isfinite(gd) or gd > graph_sep:
-                seps.append(0.5 * (P[i] + P[j]))
-
+        seps = [0.5 * (S[i] + S[j]) for i, j in cand
+                if not np.isfinite(gdist[src_row[i], j]) or gdist[src_row[i], j] > graph_sep]
         if not seps:
             return np.empty((0, 2), float)
 
         seps = np.asarray(seps, float)
-        # De-duplicate near-coincident separators (overlapping close pairs)
-        drop = {b for _, b in cKDTree(seps).query_pairs(r=max(1.0, 0.25 * thresh))}
+        tol = max(1.0, 0.25 * self.stream_point_spacing)
+        # De-duplicate near-coincident separators, and drop any already present as nodes
+        drop = {b for _, b in cKDTree(seps).query_pairs(r=tol)}
         seps = seps[[k for k in range(len(seps)) if k not in drop]]
-        print(f"  Inserted {len(seps)} separator node(s) between parallel stream "
-              f"branches (threshold {thresh:.1f} m).")
+        if len(seps) and len(existing_interior_xy):
+            d, _ = cKDTree(np.asarray(existing_interior_xy, float)).query(seps)
+            seps = seps[d > tol]
         return seps
 
     def _sample_elevations(self, points_xy):
-        """Sample DEM elevations for a list of (x, y) points."""
+        """Sample DEM elevations for a list of (x, y) points, handling nodata.
+
+        The buffered no-flow boundary and the outlet sit outside the watershed, and
+        clipped DEMs commonly carry nodata there, so some samples come back as the
+        nodata value (e.g. -999999), NaN, or out-of-bounds. Each such sample is
+        filled with the elevation of the nearest point that sampled valid terrain, so
+        no node carries the raw nodata into the mesh.
+        """
         print(f"  - Reading DEM: {self.dem_file}")
+        pts = np.asarray(points_xy, float)
         with rasterio.open(self.dem_file) as src:
-            coords = [tuple(p) for p in points_xy]
-            elevations = [val[0] for val in src.sample(coords)]
-            print(f"  - Sampled {len(elevations)} points.")
-            return np.array(elevations)
+            nodata = src.nodata
+            elev = np.array([val[0] for val in src.sample([tuple(p) for p in pts])], dtype=float)
+
+        bad = ~np.isfinite(elev)
+        if nodata is not None:
+            bad |= np.isclose(elev, nodata)
+        n_bad = int(bad.sum())
+        if n_bad:
+            if bad.all():
+                raise ValueError(
+                    f"All {len(elev)} sampled elevations are nodata; does '{self.dem_file}' "
+                    f"cover the mesh extent including the buffered boundary?")
+            good = ~bad
+            _, nn = cKDTree(pts[good]).query(pts[bad])
+            elev[bad] = elev[good][nn]
+            print(f"  - Filled {n_bad} nodata elevation(s) from the nearest valid sample.")
+        print(f"  - Sampled {len(elev)} points.")
+        return elev
 
     def _triangulate(self, all_xy, segments):
         """Step 6: triangulate the PSLG with Triangle (no Steiner points on segments)."""
