@@ -9,6 +9,8 @@ from scipy import ndimage
 from scipy.interpolate import RegularGridInterpolator
 from scipy.spatial import cKDTree
 from scipy.spatial import distance
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import dijkstra
 
 from shapely.vectorized import contains
 from shapely.ops import nearest_points, snap, linemerge
@@ -1651,6 +1653,14 @@ class MeshFromPSLG:
         ``DjYY`` suffix (e.g. ``'q10a15050'``). Do NOT include ``YY`` here — it is
         hardcoded. Default ``'q10'``. See
         https://www.cs.cmu.edu/~quake/triangle.switch.html.
+    separate_parallel_streams : bool, optional
+        Insert interior separator nodes between distinct stream branches that run
+        close together but join only far downstream, so the triangulation cannot
+        bridge them and tRIBS (``WeightedShortestPath``) does not merge them
+        prematurely. Default True.
+    parallel_merge_dist : float, optional
+        Distance (m) below which two stream nodes are candidates for a separator.
+        Defaults to ``stream_point_spacing``.
 
     Attributes
     ----------
@@ -1677,11 +1687,15 @@ class MeshFromPSLG:
     INTERIOR_REMOVE_RADIUS = 5.0    # m: thin interior points closer than this
     MIN_STREAM_GRADIENT = 0.001     # minimum enforced stream slope (1 mm/m)
     STEINER_TOL = 0.1               # m: tolerance for snapping Steiner codes to PSLG
+    PARALLEL_GRAPH_FACTOR = 3.0     # a close stream-node pair whose along-network
+                                    #   distance exceeds this many node spacings is
+                                    #   treated as a parallel approach, not a confluence
 
     def __init__(self, interior_points, watershed, stream_network, dem_file,
                  outlet=None, boundary_buffer_dist=30.0, boundary_spacing=50.0,
                  stream_point_spacing=25.0, stream_clearance_radius=2.0,
-                 mesh_quality_opts='q10'):
+                 mesh_quality_opts='q10',
+                 separate_parallel_streams=True, parallel_merge_dist=None):
 
         self.interior_points = self._coerce_interior_points(interior_points)
         self.watershed_geom = self._coerce_geometry(watershed)
@@ -1694,6 +1708,8 @@ class MeshFromPSLG:
         self.stream_point_spacing = stream_point_spacing
         self.stream_clearance_radius = stream_clearance_radius
         self.mesh_quality_opts = mesh_quality_opts
+        self.separate_parallel_streams = separate_parallel_streams
+        self.parallel_merge_dist = parallel_merge_dist
 
         # Outputs populated by generate()
         self.vertices = None
@@ -1759,6 +1775,14 @@ class MeshFromPSLG:
         stream_nodes_xy, stream_segments_local, unified_stream_geom, \
             stream_outlet_xy, outlet_bnd_local_idx = self._build_stream_network(bnd_pts, bnd_codes)
         all_interior = self._prepare_interior_points(unified_stream_geom)
+
+        # Step 3b: keep closely-spaced parallel stream branches from merging early
+        if self.separate_parallel_streams:
+            print("\nStep 3b: Separating closely-spaced parallel stream branches...")
+            seps = self._build_stream_separators(stream_nodes_xy, stream_segments_local)
+            if len(seps):
+                sep_df = pd.DataFrame({'x': seps[:, 0], 'y': seps[:, 1], 'code': 0})
+                all_interior = pd.concat([all_interior, sep_df], ignore_index=True)
 
         # Step 4: combine points (boundary first, then interior, then stream) and sample z
         print("\nStep 4: Combining points and sampling elevations from DEM...")
@@ -2032,6 +2056,71 @@ class MeshFromPSLG:
         Override to inject additional interior nodes from another data source.
         """
         return interior_pts
+
+    def _build_stream_separators(self, stream_nodes_xy, stream_segments_local):
+        """Insert interior separator nodes between distinct, closely-spaced stream
+        branches so the triangulation cannot create a direct stream-to-stream edge
+        across the gap.
+
+        tRIBS rebuilds the channel network in ``tFlowNet::WeightedShortestPath`` by
+        connecting stream nodes through stream-to-stream TIN edges. Two separate
+        branches therefore merge prematurely whenever a node on one is directly
+        triangle-adjacent to a node on the other, which can happen when the
+        corridor between the 2 stream nodes holds no interior nodes.
+        Placing an interior (code-0) node on the midpoint of each such close,
+        topologically-distant node pair splits that edge (the midpoint lies on it),
+        and because ``WeightedShortestPath`` skips code-0 nodes the two branches can
+        only join at their genuine downstream confluence.
+
+        Pairs that are close *and* near each other along the stream network are
+        confluence neighbours and are left alone; only pairs whose along-network
+        distance greatly exceeds their straight-line distance (or that lie in
+        different network components) get a separator.
+
+        Returns an (M, 2) array of separator x, y coordinates (possibly empty).
+        """
+        P = np.asarray(stream_nodes_xy, float)
+        n = len(P)
+        if n < 2 or not stream_segments_local:
+            return np.empty((0, 2), float)
+
+        thresh = float(self.parallel_merge_dist or 1.5 * self.stream_point_spacing)
+        pairs = cKDTree(P).query_pairs(r=thresh)
+        if not pairs:
+            return np.empty((0, 2), float)
+
+        # Weighted stream graph for along-network (geodesic) distances
+        rows, cols, wts = [], [], []
+        for i, j in stream_segments_local:
+            d = float(np.linalg.norm(P[i] - P[j]))
+            rows += [i, j]; cols += [j, i]; wts += [d, d]
+        graph = csr_matrix((wts, (rows, cols)), shape=(n, n))
+
+        src_list = sorted({a for pair in pairs for a in pair})
+        src_row = {s: k for k, s in enumerate(src_list)}
+        gdist = dijkstra(graph, directed=False, indices=src_list)
+
+        # Candidate pairs are already spatially close (within `thresh`); a pair is a
+        # parallel approach -- not a confluence neighbour -- when getting from one to
+        # the other *along the network* takes much farther than that, or is impossible
+        # (different network components, e.g. before the outlet reach is added).
+        graph_sep = self.PARALLEL_GRAPH_FACTOR * self.stream_point_spacing
+        seps = []
+        for i, j in pairs:
+            gd = gdist[src_row[i], j]
+            if not np.isfinite(gd) or gd > graph_sep:
+                seps.append(0.5 * (P[i] + P[j]))
+
+        if not seps:
+            return np.empty((0, 2), float)
+
+        seps = np.asarray(seps, float)
+        # De-duplicate near-coincident separators (overlapping close pairs)
+        drop = {b for _, b in cKDTree(seps).query_pairs(r=max(1.0, 0.25 * thresh))}
+        seps = seps[[k for k in range(len(seps)) if k not in drop]]
+        print(f"  Inserted {len(seps)} separator node(s) between parallel stream "
+              f"branches (threshold {thresh:.1f} m).")
+        return seps
 
     def _sample_elevations(self, points_xy):
         """Sample DEM elevations for a list of (x, y) points."""
