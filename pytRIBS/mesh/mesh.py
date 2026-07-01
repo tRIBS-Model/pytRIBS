@@ -2459,7 +2459,8 @@ class MeshProcessor:
         write_files : bool, optional
             Write the four tRIBS mesh files. Default True.
         diagnostics : bool, optional
-            Also write diagnostic shapefiles. Default False.
+            Also write diagnostic shapefiles. Default False. These are written to the
+            preprocessing folder (alongside the other GIS data), not the mesh directory.
         crs : optional
             CRS for diagnostic shapefiles. Defaults to the project EPSG from metadata.
         pslg_class : type, optional
@@ -2520,7 +2521,10 @@ class MeshProcessor:
         if diagnostics:
             if crs is None and self.meta.get('EPSG') is not None:
                 crs = f"EPSG:{self.meta['EPSG']}"
-            pslg.write_diagnostics(base, crs=crs)
+            # Write diagnostics into the preprocessing folder (with the other GIS data);
+            # fall back to the mesh dir if the mesh was built without running Preprocess.
+            diag_dir = getattr(getattr(self, 'preprocess', None), 'output_dir', None) or out_dir
+            pslg.write_diagnostics(os.path.join(diag_dir, output_prefix), crs=crs)
 
         self.pslg_mesh = pslg
         return pslg
