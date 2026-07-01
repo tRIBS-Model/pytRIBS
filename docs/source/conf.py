@@ -9,7 +9,9 @@ autodoc_default_options = {
 # Project information
 project = 'pytRIBS'
 author = 'Wren Raming'
-release = '0.5.0'  # Change to match your version
+# Derive the version from the installed package metadata so it never goes stale.
+from importlib.metadata import version as _pkg_version
+release = _pkg_version('pytRIBS')
 
 # Add any Sphinx extension module names here
 extensions = ['sphinx.ext.autodoc', 'sphinx.ext.napoleon', 'sphinx_rtd_theme']

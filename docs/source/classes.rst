@@ -32,7 +32,7 @@ pytRIBS Base Classes
    :members:
    :undoc-members:
 
-.. autoclass:: pytRIBS.model.diagnose.ModelProcessor
+.. autoclass:: pytRIBS.model.model.ModelProcessor
    :members:
    :undoc-members:
 
