@@ -333,61 +333,6 @@ class InOut:
         return {"vertices": vertices, "triangles": triangles,
                 "node_codes": node_codes, "node_edgid": node_edgid, "edges": edges}
 
-    @staticmethod
-    def read_reach_file(reach_path, crs=None, output_shp=None):
-        """
-        Read a tRIBS ``{OUTFILENAME}_reach`` file into stream-reach line geometries.
-
-        ``DeriveStreamReaches`` writes this file (ArcInfo "generate" line format) after
-        tRIBS has built the channel network via ``WeightedShortestPath`` -- so it is the
-        authoritative record of the stream reaches tRIBS actually routed on, head to
-        outlet. Each reach is a run of ``x,y`` vertices terminated by ``END``.
-
-        Parameters
-        ----------
-        reach_path : str
-            Path to the ``*_reach`` file produced by a tRIBS run.
-        crs : optional
-            CRS for the returned/written geometries (e.g. ``f"EPSG:{proj.meta['EPSG']}"``).
-        output_shp : str, optional
-            If given, also write the reaches to this shapefile.
-
-        Returns
-        -------
-        geopandas.GeoDataFrame
-            One ``LineString`` per reach, with a ``reach_id`` column.
-        """
-        reaches, coords, rid = [], [], None
-        with open(reach_path) as f:
-            for raw in f:
-                line = raw.strip()
-                if not line:
-                    continue
-                if line.upper() == "END":
-                    if coords:
-                        reaches.append((rid, coords)); coords = []; rid = None
-                    continue
-                if "," in line:
-                    xs, ys = line.split(",")[:2]
-                    coords.append((float(xs), float(ys)))
-                else:
-                    rid = int(float(line))   # bare integer => new reach id
-
-        geoms, ids, skipped = [], [], 0
-        for rid, coords in reaches:
-            if len(coords) >= 2:
-                geoms.append(LineString(coords)); ids.append(rid)
-            else:
-                skipped += 1
-        gdf = gpd.GeoDataFrame({"reach_id": ids}, geometry=geoms, crs=crs)
-        print(f"  Read {len(geoms)} reaches from {reach_path}"
-              + (f" ({skipped} single-point reaches skipped)" if skipped else ""))
-        if output_shp is not None:
-            gdf.to_file(output_shp, driver="ESRI Shapefile")
-            print(f"  Wrote {output_shp}")
-        return gdf
-
-
     def write_input_file(self, output_file_path):
         """
         Writes .in file for tRIBS model simulation, organized into sections
