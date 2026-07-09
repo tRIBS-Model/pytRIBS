@@ -787,6 +787,7 @@ class Preprocess:
 
         if clean is True:
             shutil.rmtree(temp)
+            self.output_dir = output_dir
 
         return ws_gdf
 
