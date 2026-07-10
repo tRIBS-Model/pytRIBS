@@ -15,7 +15,13 @@ A full tRIBS model setup, simulation, and analysis is provided [here.](https://z
 PytRIBS uses semantic versioning. Currently, we are in the initial development phase--anything MAY change at any time and
 this package SHOULD NOT be considered stable.
 
-## Version 0.7.3 (IN PROGRESS)
+## Version 0.7.4 (07/10/2026)
+This release fixes NLDAS-2 downloads failing with `403 Forbidden` errors from the Giovanni timeseries API.
+
+#### Changed
+* Replaced the Giovanni `/signin` token retrieval in `get_nldas_point` with the NASA-recommended Earthdata Login (EDL) token workflow via `earthaccess`. The `/signin` endpoint is an undocumented interface whose response format changed on NASA's end, breaking authentication and causing download requests to return `403 Forbidden`. The EDL token workflow follows NASA's official Giovanni API tutorial and should be robust to future changes.
+
+## Version 0.7.3 (06/17/2026)
 This release introduces the support for Python 3.13. The code was tested using a full example model setup but not every pytRIBS function was tested. PLease open an issue if you come across other problems.
 
 #### Changed
