@@ -13,8 +13,6 @@ from pytRIBS.shared.inout import InOut
 from pytRIBS.shared.aux import Aux
 import io
 import requests
-from netrc import netrc
-from requests.auth import HTTPBasicAuth
 import earthaccess
 
 
@@ -45,7 +43,8 @@ class MetProcessor(Aux, InOut):
         Fetch NLDAS-2 forcing data from NASA Giovanni for specific coordinates.
         
         This method handles authentication via Earthdata (creating a .netrc file if needed),
-        retrieves a session token, and downloads timeseries data directly from the Giovanni API.
+        retrieves an Earthdata Login bearer token, and downloads timeseries data directly
+        from the Giovanni API.
 
         Prerequisites:
         1. An Earthdata Login account.
@@ -75,49 +74,30 @@ class MetProcessor(Aux, InOut):
         print("If you see 401 errors, check your authorized apps here: https://urs.earthdata.nasa.gov/users/new\n")
 
         # Authentication
-        # We need a username/password to get a Giovanni token.
-        # We use earthaccess to ensure the user has a .netrc file set up.
+        # Uses an Earthdata Login (EDL) bearer token retrieved via earthaccess,
+        # per NASA's recommended workflow for the Giovanni timeseries API:
+        # https://github.com/nasa/gesdisc-tutorials (How_to_Access_GiC_Time_Series_Service.ipynb)
+        # earthaccess.login() checks environment variables and .netrc before
+        # falling back to an interactive prompt; persist=True saves interactive
+        # credentials to .netrc for future runs.
+        print("Retrieving Earthdata Login token...")
         try:
-            # Check if credentials exist locally
-            _ = netrc().hosts['urs.earthdata.nasa.gov']
-        except (FileNotFoundError, KeyError):
-            print("(!) Earthdata credentials not found in .netrc.")
-            print("    Initiating interactive login to save credentials...")
-            earthaccess.login(strategy="interactive", persist=True)
-
-        # Retrieve credentials from the file (guaranteed to exist now)
-        try:
-            login_info = netrc().hosts['urs.earthdata.nasa.gov']
-            username, password = login_info[0], login_info[2]
-        except Exception:
-            raise PermissionError("Could not retrieve Earthdata credentials. Please ensure you have an Earthdata account.")
-
-        # Get Giovanni Session Token
-        print("Retrieving Giovanni Session Token...")
-        signin_url = "https://api.giovanni.earthdata.nasa.gov/signin"
-        
-        try:
-            token_resp = requests.get(signin_url, auth=HTTPBasicAuth(username, password))
-            token_resp.raise_for_status()
-            token = token_resp.text.replace('"', '').strip()
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:
-                # This is the specific error for missing App Authorization
-                print("\n\033[91mAuthentication Failed (401 Unauthorized)\033[0m")
-                print("Possible causes:")
-                print("1. Invalid Username/Password")
-                print("2. Missing App Authorization")
-                print("   Action: Go to https://urs.earthdata.nasa.gov/users/new")
-                print("   Application > Authorized Apps > Approve More Applications > Authorize 'NASA GESDISC DATA ARCHIVE')")
-                print("   Once authorized try again.\n")
-                raise PermissionError("Earthdata Authorization Failed. See instructions above.") from e
-            else:
-                raise PermissionError(f"Failed to retrieve Giovanni token: {e}")
+            earthaccess.login(persist=True)
+            token = earthaccess.get_edl_token()['access_token']
+        except Exception as e:
+            print("\n\033[91mEarthdata Authentication Failed\033[0m")
+            print("Possible causes:")
+            print("1. Invalid Username/Password")
+            print("2. Missing App Authorization")
+            print("   Action: Go to https://urs.earthdata.nasa.gov")
+            print("   Application > Authorized Apps > Approve More Applications > Authorize 'NASA GESDISC DATA ARCHIVE'")
+            print("   Once authorized try again.\n")
+            raise PermissionError("Earthdata Authentication Failed. See instructions above.") from e
 
         # Configuration
         api_url = "https://api.giovanni.earthdata.nasa.gov/timeseries"
         headers = {
-            "authorizationtoken": token,
+            "Authorization": f"Bearer {token}",
             "User-Agent": "pytRIBS/1.0"
         }
         
