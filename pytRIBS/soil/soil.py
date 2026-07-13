@@ -794,40 +794,57 @@ class SoilProcessor:
 
         profile = geo_tiff['profile']
 
-        # Initialize parameter grids, 3 grids - 1 mean values, 2 std deviations, 3 code/flag
-        theta_r, theta_s, ks, psib, m = np.zeros((3, *size)), np.zeros((3, *size)), np.zeros((3, *size)), np.zeros(
-            (1, *size)), np.zeros((1, *size))
-
-        # Loop through raster's and compute soil properties using rosetta-soil package
+        # Compute soil properties using the rosetta-soil package (>= 0.3 required).
         # Codes/Flags
         # 2	sand, silt, clay (SSC)
         # 3	SSC + bulk density (BD)
         # 4	SSC + BD + field capacity water content (TH33)
         # 5	SSC + BD + TH33 + wilting point water content (TH1500)
         # -1 no result returned, inadequate or erroneous data
-        # each z layer follows:[sa (%), si (%), cl (%), bd (g/cm3), th33, th1500]
-        # i.e SoilData([sa (%), si (%), cl (%), bd (g/cm3), th33, th1500])
+        # each row follows: [sa (%), si (%), cl (%), bd (g/cm3), th33, th1500]
 
-        for i in range(0, size[0]):
-            for j in range(0, size[1]):
-                # Organize array for input into packag
-                data = [sg250_data[x, i, j] for x in np.arange(0, 6)]
-                soil_data = SoilData.from_iter([data])
-                mean, stdev, codes = rosetta(3, soil_data)  # apply Rosetta version 3
-                theta_r[:, i, j] = [mean[0, 0], stdev[0, 0], codes[0]]
-                theta_s[:, i, j] = [mean[0, 1], stdev[0, 1], codes[0]]
-                # Convert ks from log10(cm/day) into mm/hr
-                ks[:, i, j] = [(10 ** mean[0, 4]) * 10 / 24, (10 ** stdev[0, 4]) * 10 / 24, codes[0]]
+        # Predict all pixels in batched calls rather than one call per pixel.
+        # Chunked because rosetta materializes its 1000-member bootstrap ensemble
+        # per call (~32 KB/pixel), which would exhaust memory on large watersheds.
+        npix = size[0] * size[1]
+        pixel_data = sg250_data.reshape(6, npix).T
+        mean = np.zeros((npix, 7))
+        stdev = np.zeros((npix, 7))
+        codes = np.zeros(npix)
+        chunk = 10000
+        for start in range(0, npix, chunk):
+            end = min(start + chunk, npix)
+            # estimate_type='geo' returns linear-unit geometric means for alpha,
+            # n, and Ksat (columns 2-4), matching the log10-mean convention of
+            # ROSETTA and of rosetta-soil < 0.3. Do NOT apply 10** to these.
+            mean[start:end], stdev[start:end], codes[start:end] = rosetta(
+                3, SoilData.from_iter(pixel_data[start:end]), estimate_type="geo")
 
-                # Alpha parameter from rosetta corresponds approximately to the inverse of the air-entry value, cm−1
-                # https://doi.org/10.1029/2019MS001784
-                # Convert from log10(cm) into -1/mm
-                psib[0, i, j] = -1 / (10 ** mean[0, 2]) * 10
+        code_grid = codes.reshape(size)
+        theta_r = np.stack([mean[:, 0].reshape(size), stdev[:, 0].reshape(size), code_grid])
+        theta_s = np.stack([mean[:, 1].reshape(size), stdev[:, 1].reshape(size), code_grid])
+        # Convert Ksat from cm/day to mm/hr
+        ks = np.stack([mean[:, 4].reshape(size) * 10 / 24,
+                       stdev[:, 4].reshape(size) * 10 / 24, code_grid])
 
-                # Pore-size Distribution can be calculated from n using m = n - 1
-                # http://dx.doi.org/10.4236/ojss.2012.23025
-                # Convert from log10(n) into n
-                m[0, i, j] = (10 ** mean[0, 3]) - 1
+        alpha = mean[:, 2]  # vG alpha (1/cm)
+        n_vg = mean[:, 3]   # vG n
+
+        # Brooks-Corey air-entry head equivalent to the vG retention curve, via
+        # Morel-Seytoux et al. (1996, WRR 32(5), eq. 17), preserving the effective
+        # capillary drive so infiltration behavior is insensitive to the
+        # retention-model choice. Note 1/alpha alone overestimates the BC
+        # air-entry head several-fold and must not be used directly.
+        m_vg = 1 - 1 / n_vg
+        p = 1 + 2 / m_vg
+        h_ce = (1 / alpha) * ((p + 3) / (2 * p * (p - 1))) \
+               * ((147.8 + 8.1 * p + 0.092 * p ** 2) / (55.6 + 7.4 * p + p ** 2))
+        psib = (-h_ce * 10).reshape(1, *size)  # cm -> mm, negative per tRIBS convention
+
+        # Brooks-Corey pore-size distribution index: the asymptotic (dry-end)
+        # equivalence of the two retention curves gives lambda = n - 1
+        # [Morel-Seytoux et al., 1996, eq. 16].
+        m = (n_vg - 1).reshape(1, *size)
 
         # for now only write out mean values
         soil_prop = [ks[0, :, :], theta_r[0, :, :], theta_s[0, :, :], psib[0, :, :], m[0, :, :]]
