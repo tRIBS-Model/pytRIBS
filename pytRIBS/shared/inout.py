@@ -527,7 +527,7 @@ class InOut:
         if file_path is None:
             file_path = self.options['snowfilename']['value']
 
-            if file_path is None:
+            if not file_path:
                 print(self.options['snowfilename']['keyword'] + " is not specified.")
                 return None
 
