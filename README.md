@@ -16,7 +16,7 @@ PytRIBS uses semantic versioning. Currently, we are in the initial development p
 this package SHOULD NOT be considered stable.
 
 ## Version 0.7.4 (07/10/2026)
-This release fixes NLDAS-2 downloads failing with `403 Forbidden` errors from the Giovanni timeseries API.
+This release fixes NLDAS-2 downloads failing with `403 Forbidden` errors from the Giovanni timeseries API and pins the rosetta-soil dependency to prevent breaking changes in newer versions.
 
 #### Changed
 * Replaced the Giovanni `/signin` token retrieval in `get_nldas_point` with the NASA-recommended Earthdata Login (EDL) token workflow via `earthaccess`. The `/signin` endpoint is an undocumented interface whose response format changed on NASA's end, breaking authentication and causing download requests to return `403 Forbidden`. The EDL token workflow follows NASA's official Giovanni API tutorial and should be robust to future changes.
