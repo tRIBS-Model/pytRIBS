@@ -27,7 +27,7 @@ into five preprocessing classes and two simulation classes, each of which draws 
 
 ## Installation
 
-pytRIBS requires **Python 3.10+**. Install from source with:
+pytRIBS requires **Python 3.11+**. Install from source with:
 
 ```bash
 git clone https://github.com/tRIBS-Model/pytRIBS.git

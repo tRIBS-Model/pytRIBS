@@ -39,7 +39,7 @@ dependencies = [
     "rioxarray>=0.17.0",
 ]
 version = "1.0.0"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 [project.urls]
 Repository = "https://github.com/tRIBS-Model/pytRIBS"
