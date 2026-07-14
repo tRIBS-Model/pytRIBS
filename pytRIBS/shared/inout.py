@@ -1052,26 +1052,34 @@ class InOut:
 
         updated_lines = []
         replaced = False
-    
-        # Use enumerate to get the line number (i)
-        for i, line in enumerate(lines):
-            # Check if we are in the header (first 6 lines)
-            if i < 6:
+
+        def _is_number(s):
+            try:
+                float(s)
+                return True
+            except ValueError:
+                return False
+
+        for line in lines:
+            tokens = line.strip().split()
+            # Header lines (ncols, nrows, ..., NODATA_value) start with a non-numeric
+            # token. The header length varies, GDAL may write dx/dy in place of
+            # cellsize, so detect headers by content rather than by line count.
+            if tokens and not _is_number(tokens[0]):
                 if line.startswith("dx") or line.startswith("dy"):
                     if not replaced:
-                        updated_lines.append("cellsize " + str(math.ceil(float(line.split()[1]))) + "\n")
+                        updated_lines.append("cellsize " + str(math.ceil(float(tokens[1]))) + "\n")
                         replaced = True
                 else:
                     updated_lines.append(line)
-            # We are in the data part of the file (everything after line 5)
             else:
                 # Check if the user wants to format the numbers
                 if decimals is not None and isinstance(decimals, int):
                     # Create a format string, e.g., "%.0f" or "%.1f"
                     fmt = f"%.{decimals}f"
                     # Check for empty lines, which can happen at the end of files
-                    if line.strip():
-                        new_line = " ".join([fmt % float(n) for n in line.strip().split()]) + "\n"
+                    if tokens:
+                        new_line = " ".join([fmt % float(n) for n in tokens]) + "\n"
                         updated_lines.append(new_line)
                 else:
                     # If decimals is None, just add the original line back
