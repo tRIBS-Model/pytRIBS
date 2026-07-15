@@ -67,7 +67,7 @@ class Infile:
             "flowexp": {"keyword": "FLOWEXP:", "describe": "Nonlinear discharge coefficient", "value": 0.3,
                         "tags": ["flow"], "section": 1, "subsection": "Routing Variables"},
             "channelroughness": {"keyword": "CHANNELROUGHNESS:", "describe": "Uniform channel roughness value",
-                                 "value": 0.15, "tags": ["flow"], "section": 1, "subsection": "Routing Variables"},
+                                 "value": 0.035, "tags": ["flow"], "section": 1, "subsection": "Routing Variables"},
             "channelwidth": {"keyword": "CHANNELWIDTH:", "describe": "Uniform channel width  (meters)", "value": 12,
                              "tags": ["flow"], "section": 1, "subsection": "Routing Variables"},
             "channelwidthcoeff": {"keyword": "CHANNELWIDTHCOEFF:",
