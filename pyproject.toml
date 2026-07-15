@@ -41,5 +41,16 @@ dependencies = [
 version = "1.0.0"
 requires-python = ">=3.11"
 
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
 [project.urls]
 Repository = "https://github.com/tRIBS-Model/pytRIBS"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Network canaries are excluded by default; run them with `pytest -m network`
+addopts = "-m 'not network'"
+markers = [
+    "network: tests that hit live external services (ISRIC, SOLUS, POLARIS, NASA Giovanni)",
+]
