@@ -253,10 +253,11 @@ class Soil(SoilProcessor):
         if meta is not None:
             self.meta=meta
 
+        # read_input_file assigns values into self.options in place
+        self.options = Infile.create_input_file()
         if input_file is not None:
-            options = Shared.read_input_file(input_file)
-        else:
-            options = Infile.create_input_file()
+            Shared.read_input_file(self, input_file)
+        options = self.options
 
         # Initialize attributes
         self.soilmapname = options['soilmapname']
@@ -305,10 +306,11 @@ class Land(LandProcessor):
         if meta is not None:
             self.meta=meta
 
+        # read_input_file assigns values into self.options in place
+        self.options = Infile.create_input_file()
         if input_file is not None:
-            options = Shared.read_input_file(input_file)
-        else:
-            options = Infile.create_input_file()
+            Shared.read_input_file(self, input_file)
+        options = self.options
 
         # Initialize attributes
         self.landmapname = options['landmapname']
@@ -393,10 +395,11 @@ class Mesh(MeshProcessor):
         if generate_mesh_args is not None:
             self.mesh_generator = GenerateMesh(*generate_mesh_args)
 
+        # read_input_file assigns values into self.options in place
+        self.options = Infile.create_input_file()
         if input_file is not None:
-            options = Shared.read_input_file(input_file)
-        else:
-            options = Infile.create_input_file()
+            Shared.read_input_file(self, input_file)
+        options = self.options
 
         # Initialize attributes
         self.pointfilename = options['pointfilename']
@@ -453,10 +456,11 @@ class Met(MetProcessor):
         if meta is not None:
             self.meta = meta
 
+        # read_input_file assigns values into self.options in place
+        self.options = Infile.create_input_file()
         if input_file is not None:
-            options = Shared.read_input_file(input_file)
-        else:
-            options = Infile.create_input_file()
+            Shared.read_input_file(self, input_file)
+        options = self.options
 
         self.hydrometstations = options['hydrometstations']
         self.gaugestations = options['gaugestations']
