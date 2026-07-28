@@ -726,7 +726,10 @@ class SoilProcessor:
                 # Organize array for input into packag
                 data = [sg250_data[x, i, j] for x in np.arange(0, 6)]
                 soil_data = SoilData.from_iter([data])
-                mean, stdev, codes = rosetta(3, soil_data)  # apply Rosetta version 3
+                # estimate_type="log" returns log10(alpha), log10(npar), and log10(Ksat),
+                # which is what the 10** conversions below expect. Omitting it
+                # silently double-transforms Ks, psib, and m.
+                mean, stdev, codes = rosetta(3, soil_data, estimate_type="log")  # apply Rosetta version 3
                 theta_r[:, i, j] = [mean[0, 0], stdev[0, 0], codes[0]]
                 theta_s[:, i, j] = [mean[0, 1], stdev[0, 1], codes[0]]
                 # Convert ks from log10(cm/day) into mm/hr

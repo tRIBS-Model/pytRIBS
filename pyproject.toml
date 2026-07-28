@@ -26,7 +26,7 @@ dependencies = [
     "PyWavelets>=1.8.0",
     "rasterio>=1.4.0",
     "requests>=2.32.3",
-    "rosetta-soil>=0.1.2,<0.3",
+    "rosetta-soil>=0.3,<0.4",
     "scikit-learn>=1.7.0",
     "scipy>=1.14.0",
     "shapely>=2.0.7",
@@ -38,7 +38,7 @@ dependencies = [
     "rioxarray>=0.17.0",
 ]
 version = "0.7.4"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 [project.urls]
 Repository = "https://github.com/tRIBS-Model/pytRIBS"
