@@ -606,12 +606,22 @@ class InOut:
     def read_precip_station(file_path):
         """
         Returns pandas dataframe of precipitation from a station specified by file_path.
-        :param file_path: tRIBS precip data file (*.mdf), comma-delimited with header Y,M,D,H,R
+
+        Like tRIBS, columns are read by position, not by header name: the first line is
+        treated as a descriptive header and skipped, and the five columns are interpreted
+        as Year, Month, Day, Hour, R (mm) in that order regardless of the header labels.
+        :param file_path: tRIBS precip data file (*.mdf), comma-delimited with a header line
+            followed by columns in the order Year,Month,Day,Hour,R_mm.
         :return: Pandas dataframe
         """
         # TODO add var for specifying Station ID
+        names = ['year', 'month', 'day', 'hour', 'R']
         df = pd.read_csv(file_path, header=0, sep=',')
-        df.rename(columns={'Y': 'year', 'M': 'month', 'D': 'day', 'H': 'hour'}, inplace=True)
+        if df.shape[1] != len(names):
+            raise ValueError(
+                f"{file_path}: expected {len(names)} columns "
+                f"(Year, Month, Day, Hour, R), found {df.shape[1]}")
+        df.columns = names
         df['date'] = pd.to_datetime(df[['year', 'month', 'day', 'hour']])
         df.drop(['year', 'month', 'day', 'hour'], axis=1, inplace=True)
 
@@ -692,18 +702,17 @@ class InOut:
     def write_precip_station(df, output_file_path):
         """
         Converts a DataFrame with 'date' and 'R' columns to the tRIBS precip data file
-        (*.mdf) format: comma-delimited with header Y,M,D,H,R.
+        (*.mdf) format: comma-delimited with header Year,Month,Day,Hour,R_mm.
         :param df: Pandas DataFrame with 'date' and 'R' columns.
         :param output_file_path: Output *.mdf path.
         """
-        # Extract Y, M, D, and H from the 'date' column
-        df['Y'] = df['date'].dt.year
-        df['M'] = df['date'].dt.month
-        df['D'] = df['date'].dt.day
-        df['H'] = df['date'].dt.hour
+        # Extract Year, Month, Day, and Hour from the 'date' column
+        df['Year'] = df['date'].dt.year
+        df['Month'] = df['date'].dt.month
+        df['Day'] = df['date'].dt.day
+        df['Hour'] = df['date'].dt.hour
 
-        # Reorder columns
-        df = df[['Y', 'M', 'D', 'H', 'R']]
+        df = df[['Year', 'Month', 'Day', 'Hour', 'R']].rename(columns={'R': 'R_mm'})
 
         # Write DataFrame to flat file
         df.to_csv(output_file_path, sep=',', index=False)
@@ -732,7 +741,8 @@ class InOut:
         Parameters
         ----------
         file_path : str
-            Path to the *.mdf file. The file is comma-delimited with the header
+            Path to the *.mdf file. The file is comma-delimited with a header line followed
+            by columns in the order
             Year,Month,Day,Hour,PA_mb,RH_pct,XC_tenths,US_m/s,TA_C,IS_W/m2,TS_C.
 
         Returns
@@ -743,13 +753,18 @@ class InOut:
 
         Notes
         -----
-        - The descriptive, unit-bearing header columns are mapped to the short variable names.
+        - Like tRIBS, columns are read by position, not by header name: the first line is
+          treated as a descriptive header and skipped, and the columns are interpreted in the
+          fixed order above regardless of the header labels.
         - Year/Month/Day/Hour are combined into a single 'date' column and dropped.
         """
+        names = ['year', 'month', 'day', 'hour', 'PA', 'RH', 'XC', 'US', 'TA', 'IS', 'TS']
         df = pd.read_csv(file_path, header=0, sep=',')
-        df.rename(columns={'Year': 'year', 'Month': 'month', 'Day': 'day', 'Hour': 'hour',
-                           'PA_mb': 'PA', 'RH_pct': 'RH', 'XC_tenths': 'XC', 'US_m/s': 'US',
-                           'TA_C': 'TA', 'IS_W/m2': 'IS', 'TS_C': 'TS'}, inplace=True)
+        if df.shape[1] != len(names):
+            raise ValueError(
+                f"{file_path}: expected {len(names)} columns (Year, Month, Day, Hour, "
+                f"PA, RH, XC, US, TA, IS, TS), found {df.shape[1]}")
+        df.columns = names
         df['date'] = pd.to_datetime(df[['year', 'month', 'day', 'hour']])
         df = df.drop(['year', 'month', 'day', 'hour'], axis=1)
         return df

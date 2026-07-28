@@ -313,7 +313,7 @@ class SoilProcessor:
         descriptive header line (skipped by tRIBS) followed by comma-delimited rows of
         parameter values:
 
-        ID,Ks_mm/hr,ThetaS_m3/m3,ThetaR_m3/m3,m_[],PsiB_cm,f_1/mm,As_[],Au_[],n_m3/m3,ks_J/msK,Cs_J/m3K
+        ID,Ks_mm/hr,ThetaS_m3/m3,ThetaR_m3/m3,m_[],PsiB_mm,f_1/mm,As_[],Au_[],n_m3/m3,ks_J/msK,Cs_J/m3K
 
         Soil texture is never written into the .sdt itself: tRIBS reads every value on a row, so
         a trailing texture column would be parsed as an extra parameter. When textures=True the
@@ -325,7 +325,7 @@ class SoilProcessor:
         :param textures: Optional True/False for writing a texture reference sidecar alongside the .sdt.
 
         """
-        header = ("ID,Ks_mm/hr,ThetaS_m3/m3,ThetaR_m3/m3,m_[],PsiB_cm,f_1/mm,As_[],Au_[],"
+        header = ("ID,Ks_mm/hr,ThetaS_m3/m3,ThetaR_m3/m3,m_[],PsiB_mm,f_1/mm,As_[],Au_[],"
                   "n_m3/m3,ks_J/msK,Cs_J/m3K")
 
         with open(file_path, 'w') as file:
