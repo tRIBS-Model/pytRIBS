@@ -318,16 +318,25 @@ class Infile:
             # ==================================================================================================
             # PARALLEL MODE
             # ==================================================================================================
-            "parallelmode": {"keyword": "PARALLELMODE:", "describe": ("Parallel or Serial Mode Option\n"
+            "parallelmode": {"keyword": "PARALLELMODE:", "describe": ("Serial Mode, Parallel, or Partitioning Mode Option\n"
                                                                       "0  Run in serial mode\n"
-                                                                      "1  Run in parallel mode"),
+                                                                      "1  Run in parallel mode\n"
+                                                                      "2  Generate partition only with summary statistics"),
                              "value": 0, "tags": ["parallel"], "section": 6},
-            "graphoption": {"keyword": "GRAPHOPTION:", "describe": ("Graph File Type Option\n"
-                                                                    "0  Default partitioning of the graph\n"
-                                                                    "1  Reach-based partitioning\n"
-                                                                    "2  Inlet/outlet-based partitioning"),
+            "graphoption": {"keyword": "GRAPHOPTION:", "describe": ("Reach partitioning method\n"
+                                                                    "Reach-graph partitioning method (used to generate the\n"
+                                                                    "partition when no GRAPHFILE exists yet):\n"
+                                                                    "0  SurfaceFlow (SF): flow edges only\n"
+                                                                    "1  Surface-Subsurface Flow (SSF): flow + subsurface flux\n"
+                                                                    "2  Surface-Subsurface Flow w/ Headwaters (SSF-H):\n"
+                                                                    "   SSF plus balancing of headwater reaches"),
                             "value": 0, "tags": ["parallel"], "section": 6},
-            "graphfile": {"keyword": "GRAPHFILE:", "describe": "Reach connectivity filename (graph file option 1,2)",
+            "graphfile": {"keyword": "GRAPHFILE:", "describe": ("Reach connectivity filename\n"
+                                                                "Path to the reach graph file. If the file exists it is\n"
+                                                                "read; if it does not, tRIBS generates the partition\n"
+                                                                "in-process with METIS (using GRAPHOPTION above) and\n"
+                                                                "writes for reuse. The partition is always sized\n"
+                                                                "to the number of MPI processes."),
                           "value": None, "tags": ["parallel"], "section": 6},
         }
 

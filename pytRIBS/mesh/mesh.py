@@ -1578,6 +1578,12 @@ class GenerateMesh:
         """
         Partitions a mesh and produces a .reach file for parallel execution with tRIBS.
 
+        This MeshBuilder/METIS workflow is optional as of tRIBS v6.0.0, which partitions the reach
+        graph in-process with METIS when the ``GRAPHFILE`` path does not yet exist. It is kept here
+        for users who want to pre-generate a partition externally: point ``GRAPHFILE`` at the
+        resulting .reach file and tRIBS reads it, validating it against the mesh and the ``-np``
+        processor count.
+
         This function handles the partitioning of a mesh by interacting with Docker to build and process
         the mesh based on the provided input files and partitioning parameters. It performs the following steps:
 

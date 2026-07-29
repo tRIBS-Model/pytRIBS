@@ -348,11 +348,14 @@ class Mesh(MeshProcessor):
     pointfilename : str
         The name of the file containing the mesh points.
     graphfile : str
-        The name of the file containing the mesh graph.
+        The name of the reach connectivity (``.reach``) file used to partition a parallel
+        run. Optional: if the file does not exist tRIBS generates the partition in-process
+        with METIS and writes it there for reuse, sized to the number of MPI processes.
     optmeshinput : int
         Option flag for mesh input processing.
     graphoption : int
-        Option for graph generation.
+        Reach partitioning method used for parallel runs: 0 = SF (surface flow edges only),
+        1 = SSF (flow plus subsurface flux edges), 2 = SSFH (SSF plus headwater balancing).
     demfile : str
         The name of the file containing the Digital Elevation Model (DEM) data.
     preprocess : :class:`~pytRIBS.preprocess.Preprocess`, optional
