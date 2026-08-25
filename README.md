@@ -1,4 +1,7 @@
 # pytRIBS
+> [!IMPORTANT]
+> **Warning:** This branch was made for specific users who may still require code updates to pre-v1.0.0 codebase, do not use this branch.
+> 
 A pre-to-post processing python package designed to allow users to setup, simulate, and analyze TIN-based Real-time Integrated Basin Simulator (tRIBS) model runs through a python interface.
 Note this packages is currently under development and is subject to further changes. Additionally, much of the functionality here has had limited testing, consequently responsibility is on the user to verify package functionality. 
 
