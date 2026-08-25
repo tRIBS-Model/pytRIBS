@@ -121,6 +121,24 @@ class Aux:
 
         return lat, lon, gmt_offset
 
+    def update_solar_position(self, watershed):
+        """
+        Computes the watershed centroid (latitude, longitude) and its UTC offset and stores them
+        in the CENTROIDLAT, CENTROIDLONG, and UTCOFFSET input-file options. tRIBS uses these for
+        solar position calculations. These keywords can also be set manually like any other
+        option; this helper is the auto-populating path used by the delineation and met workflows.
+
+        :param watershed: A Shapely polygon of the watershed. The centroid is used.
+        """
+        result = Aux.polygon_centroid_to_geographic(self, watershed)
+        if result is None:
+            return
+
+        lat, lon, gmt = result
+        self.centroidlat['value'] = lat
+        self.centroidlong['value'] = lon
+        self.utcoffset['value'] = gmt
+
     def utm_to_latlong(self, easting, northing, epsg=None):
         """
         Convert UTM coordinates to latitude and longitude using an EPSG code with pyproj.

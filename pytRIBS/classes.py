@@ -17,7 +17,8 @@ from pytRIBS.results.evaluate import Evaluate
 # preprocessing componets
 from pytRIBS.soil.soil import SoilProcessor
 from pytRIBS.met.met import MetProcessor
-from pytRIBS.mesh.mesh import Preprocess, GenerateMesh
+from pytRIBS.spinup.spinup import SpinupProcessor
+from pytRIBS.mesh.mesh import Preprocess, GenerateMesh, MeshProcessor
 from pytRIBS.land.land import LandProcessor
 
 import os
@@ -59,6 +60,8 @@ class Project:
             "model": os.path.join("data", "model"),
             "preprocessing": os.path.join("data", "preprocessing"),
             "results": "results",
+            "spinup": os.path.join("results", "spinup"),
+            "restart": "restart",
             "soil": os.path.join("data", "model", "soil"),
             "land": os.path.join("data", "model", "land"),
             "met_precip": os.path.join("data", "model", "met", "precip"),
@@ -79,7 +82,7 @@ class Project:
             full_path = os.path.join(self.base_dir, rel_path)
             os.makedirs(full_path, exist_ok=True)
 
-class Model(Infile, Shared, Aux, ModelProcessor, Preprocess, InOut):
+class Model(Infile, Shared, Aux, ModelProcessor, Preprocess, InOut, SpinupProcessor):
     """
     pytRIBS Model class.
 
@@ -114,9 +117,14 @@ class Model(Infile, Shared, Aux, ModelProcessor, Preprocess, InOut):
     def __init__(self, input_file=None, met=None, land=None, soil=None, mesh=None, meta=None):
         # attributes
         self.options = self.create_input_file()  # input options for tRIBS model run
+        self.snow_options = self.create_snow_params()  # snow module parameter options
 
         if input_file is not None:
             self.read_input_file(input_file)
+
+            # Load snow parameters from the *.spf file if one is referenced
+            if self.options['snowfilename']['value'] is not None:
+                self.read_snow_params()
 
         Meta.__init__(self)
 
@@ -134,8 +142,15 @@ class Model(Infile, Shared, Aux, ModelProcessor, Preprocess, InOut):
 
     # SIMULATION METHODS
     def __getattr__(self, name):
-        if name in self.options:
-            return self.options[name]
+        # __getattr__ only fires for attributes missing from __dict__. Look up options/snow_options
+        # via __dict__ directly so that probing for a missing 'options' (e.g. during copy/pickle of
+        # a not-yet-initialized instance) raises AttributeError instead of recursing.
+        options = self.__dict__.get('options')
+        if options is not None and name in options:
+            return options[name]
+        snow_options = self.__dict__.get('snow_options')
+        if snow_options is not None and name in snow_options:
+            return snow_options[name]
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
     def __dir__(self):
@@ -238,10 +253,11 @@ class Soil(SoilProcessor):
         if meta is not None:
             self.meta=meta
 
+        # read_input_file assigns values into self.options in place
+        self.options = Infile.create_input_file()
         if input_file is not None:
-            options = Shared.read_input_file(input_file)
-        else:
-            options = Infile.create_input_file()
+            Shared.read_input_file(self, input_file)
+        options = self.options
 
         # Initialize attributes
         self.soilmapname = options['soilmapname']
@@ -290,10 +306,11 @@ class Land(LandProcessor):
         if meta is not None:
             self.meta=meta
 
+        # read_input_file assigns values into self.options in place
+        self.options = Infile.create_input_file()
         if input_file is not None:
-            options = Shared.read_input_file(input_file)
-        else:
-            options = Infile.create_input_file()
+            Shared.read_input_file(self, input_file)
+        options = self.options
 
         # Initialize attributes
         self.landmapname = options['landmapname']
@@ -303,7 +320,7 @@ class Land(LandProcessor):
         self.optluintercept = options['optluinterp']
 
 
-class Mesh:
+class Mesh(MeshProcessor):
     """
     A pytRIBS Mesh Class.
 
@@ -321,17 +338,24 @@ class Mesh:
         Path to the input file for initializing attributes.
     meta : dict, optional
         Metadata associated with the mesh.
+    mesh_dir : str, optional
+        Default output directory for generated mesh files (typically
+        ``proj.directories['mesh']``). Used by :meth:`build_mesh` and friends when no
+        explicit output location is given. Defaults to the current working directory.
 
     Attributes
     ----------
     pointfilename : str
         The name of the file containing the mesh points.
     graphfile : str
-        The name of the file containing the mesh graph.
+        The name of the reach connectivity (``.reach``) file used to partition a parallel
+        run. Optional: if the file does not exist tRIBS generates the partition in-process
+        with METIS and writes it there for reuse, sized to the number of MPI processes.
     optmeshinput : int
         Option flag for mesh input processing.
     graphoption : int
-        Option for graph generation.
+        Reach partitioning method used for parallel runs: 0 = SF (surface flow edges only),
+        1 = SSF (flow plus subsurface flux edges), 2 = SSFH (SSF plus headwater balancing).
     demfile : str
         The name of the file containing the Digital Elevation Model (DEM) data.
     preprocess : :class:`~pytRIBS.preprocess.Preprocess`, optional
@@ -352,34 +376,50 @@ class Mesh:
     """
 
     def __init__(self, preprocess_args=None, generate_mesh_args=None,
-                 input_file=None, meta= None):
+                 input_file=None, meta=None, mesh_dir=None):
         Meta.__init__(self)
 
         if meta is not None:
             self.meta = meta
 
+        # Default directory for generated mesh outputs (e.g. proj.directories['mesh']).
+        # Used by build_mesh/generate_pslg_mesh/generate_points_mesh when no explicit
+        # output location is given, mirroring Preprocess's dir_proccesed convention.
+        self.mesh_dir = mesh_dir
+
+        boundary_gdf = None
         if preprocess_args is not None:  # TODO need to catch if generate_mesh_args is NONE
             self.preprocess = Preprocess(*preprocess_args)
             _, bound_path, stream_path, out_path, _ = generate_mesh_args
-            self.preprocess.extract_watershed_and_stream_network(out_path, bound_path,
-                                                                 stream_path)
+            boundary_gdf = self.preprocess.extract_watershed_and_stream_network(out_path, bound_path,
+                                                                                stream_path)
             self.meta = self.preprocess.meta
 
         if generate_mesh_args is not None:
             self.mesh_generator = GenerateMesh(*generate_mesh_args)
 
+        # read_input_file assigns values into self.options in place
+        self.options = Infile.create_input_file()
         if input_file is not None:
-            options = Shared.read_input_file(input_file)
-        else:
-            options = Infile.create_input_file()
+            Shared.read_input_file(self, input_file)
+        options = self.options
 
         # Initialize attributes
         self.pointfilename = options['pointfilename']
+        self.inputdatafile = options['inputdatafile']
         self.graphfile = options['graphfile']
         self.optmeshinput = options['optmeshinput']
         self.graphoption = options['graphoption']
         self.demfile = options['demfile']
 
+        # Solar position options auto-populated from the watershed centroid (see update_solar_position)
+        self.utcoffset = options['utcoffset']
+        self.centroidlat = options['centroidlat']
+        self.centroidlong = options['centroidlong']
+
+        # If a watershed was delineated above, auto-populate the solar position keywords from it
+        if boundary_gdf is not None:
+            Aux.update_solar_position(self, boundary_gdf.geometry.iloc[0])
 
 class Met(MetProcessor):
     """
@@ -402,18 +442,12 @@ class Met(MetProcessor):
         The path or name of the file containing hydrometeorological station data.
     gaugestations : str
         The path or name of the file containing gauge station data.
-    hydrometbasename : str
-        The base name for hydrometeorological data files.
     rainfile : str
         The path or name of the file containing rainfall data.
     hydrometgrid : str
         The path or name of the file containing the hydrometeorological grid data.
-    metdataoption : int
-        Option flag for meteorological data processing.
     rainsource : str
         The source of the rainfall data.
-    gaugebasename : str
-        The base name for gauge data files.
     rainextension : str
         The file extension for the rainfall data files.
     """
@@ -425,17 +459,25 @@ class Met(MetProcessor):
         if meta is not None:
             self.meta = meta
 
+        # read_input_file assigns values into self.options in place
+        self.options = Infile.create_input_file()
         if input_file is not None:
-            options = Shared.read_input_file(input_file)
-        else:
-            options = Infile.create_input_file()
+            Shared.read_input_file(self, input_file)
+        options = self.options
 
         self.hydrometstations = options['hydrometstations']
         self.gaugestations = options['gaugestations']
-        self.hydrometbasename = options['hydrometbasename']
         self.rainfile = options['rainfile']
         self.hydrometgrid = options['hydrometgrid']
         self.metdataoption = options['metdataoption']
         self.rainsource = options['rainsource']
-        self.gaugebasename = options['gaugebasename']
         self.rainextension = options['rainextension']
+
+        # pytRIBS-internal naming prefix for generated met/precip output files. Not a tRIBS input                                
+        # keyword (so it is not written to the .in file); used by the met workflow.                                              
+        self.hydrometbasename = {'value': None}       
+
+        # Solar position options auto-populated from the watershed centroid (see update_solar_position)
+        self.utcoffset = options['utcoffset']
+        self.centroidlat = options['centroidlat']
+        self.centroidlong = options['centroidlong']

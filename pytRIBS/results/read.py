@@ -16,7 +16,7 @@ class Read():
         This method reads a `.qout` file containing outlet discharge and water level data, parses it into a DataFrame, and converts
         the time information from hours since the start date to actual timestamps.
 
-        The `.qout` file is expected to be named by appending `'_Outlet.qout'` to the value of the `"outhydrofilename"` option
+        The `.qout` file is expected to be named by appending `'_Outlet.qout'` to the value of the `"outfilename"` option
         from the `self.options` dictionary.
 
         The method performs the following steps:
@@ -34,32 +34,77 @@ class Read():
             - `Time` is the converted timestamp corresponding to each time step.
         """
         # currently only read for outlet, neet to add for hydronodelist
-        qout_file = self.options["outhydrofilename"]["value"]+'_Outlet.qout'
-        qout_df = pd.read_csv(qout_file, header=None, names=['Time_hr', 'Qstrm_m3s', 'Hlev_m'], skiprows=1, sep='\t')
+        qout_file = self.options["outfilename"]["value"]+'_Outlet.qout'
+        qout_df = pd.read_csv(qout_file, header=None, names=['Time_hr', 'Qstrm_m3s', 'Hlev_m'], skiprows=1, sep=',')
 
         starting_date = self.options["startdate"]["value"]
         date = self.convert_to_datetime(starting_date)
         dt = pd.to_timedelta(qout_df['Time_hr'], unit='h')
         qout_df['Time'] = [date + step for step in dt]
         return qout_df
+
+    # SWE is written in centimeters under a different column per output file: AvSWE_cm in the
+    # basin-averaged .mrf and SnWE_cm in the per-node .pixel. get_swe_series returns it in mm.
+    _SWE_MRF_COL = 'AvSWE_cm'
+    _SWE_PIXEL_COL = 'SnWE_cm'
+    _SWE_CM_TO_MM = 10.0
+
+    def get_swe_series(self, node_id=None):
+        """
+        Return simulated snow water equivalent (SWE) as a time-indexed Series in millimeters.
+
+        SWE is stored in centimeters under a different column in each output file (``AvSWE_cm`` in
+        the basin-averaged ``.mrf``, ``SnWE_cm`` in the per-node ``.pixel``); this getter selects
+        the right column, converts to mm, and indexes by ``Time``. It is the single source of the
+        SWE column/units knowledge shared by the SWE plot and the SWE evaluation helpers.
+
+        Parameters
+        ----------
+        node_id : int, optional
+            If ``None`` (default), basin-averaged SWE from the ``.mrf``. If given, SWE for that
+            node from its ``.pixel`` output.
+
+        Returns
+        -------
+        pandas.Series
+            SWE in mm, indexed by datetime, named ``"SWE_mm"``.
+        """
+        if node_id is None:
+            if self.mrf.get('mrf') is None:
+                self.get_mrf_results()
+            df = self.mrf['mrf'].set_index('Time')
+            col, where = self._SWE_MRF_COL, 'the mrf output'
+        else:
+            if not self.element:
+                self.get_element_results()
+            if node_id not in self.element:
+                raise ValueError(f"Node {node_id} not found. Available nodes: "
+                                 f"{sorted(self.element.keys())}")
+            df = self.element[node_id]['pixel'].set_index('Time')
+            col, where = self._SWE_PIXEL_COL, f"pixel output for node {node_id}"
+
+        if col not in df.columns:
+            raise ValueError(f"SWE column '{col}' not found in {where}. Is the snow module on? "
+                             f"Available columns: {list(df.columns)}")
+
+        return (df[col] * self._SWE_CM_TO_MM).rename('SWE_mm')
+
     def get_mrf_results(self, mrf_file=None):
         """
         Reads and processes the `.mrf` file containing model results.
 
-        If `mrf_file` is not provided, constructs the filename using the value of the `"outhydrofilename"` option
+        If `mrf_file` is not provided, constructs the filename using the value of the `"outfilename"` option
         from `self.options`, combined with the runtime value, and appends `"_00.mrf"` to it.
 
         This method performs the following steps:
-        1. Reads the column names and units from the first two rows of the `.mrf` file.
-        2. Loads the data into a DataFrame, skipping the first two rows which contain metadata.
-        3. Assigns the read column names to the DataFrame and adds the units as metadata.
-        4. Converts the `Time` column from hours since the start date to actual timestamps.
-        5. Updates the `self.mrf` attribute with the results, excluding extra time steps that may be included in the file.
+        1. Reads the data into a DataFrame using the single CSV header line for column names.
+        2. Converts the `Time` column from hours since the start date to actual timestamps.
+        3. Updates the `self.mrf` attribute with the results, excluding extra time steps that may be included in the file.
 
         Parameters
         ----------
         mrf_file : str, optional
-            The path to the `.mrf` file. If not provided, the filename is constructed based on the `"outhydrofilename"` and `"runtime"`
+            The path to the `.mrf` file. If not provided, the filename is constructed based on the `"outfilename"` and `"runtime"`
             options from `self.options`.
 
         Returns
@@ -73,26 +118,16 @@ class Read():
             while len(runtime) < 4:
                 runtime = '0' + runtime
 
-            mrf_file = self.options["outhydrofilename"]["value"] + runtime + "_00.mrf"
+            mrf_file = self.options["outfilename"]["value"] + runtime + "_00.mrf"
 
-        # Read the first two rows to get column names and units
-        with open(mrf_file, 'r') as file:
-            column_names = file.readline().strip().split('\t')  # Assuming tab-separated data
-            units = file.readline().strip().split('\t')  # Assuming tab-separated data
-
-        # Read the data into a DataFrame, skipping the first two rows
-        results_data_frame = pd.read_csv(mrf_file, skiprows=1, sep='\t')
-
-        # Assign column names to the DataFrame
-        results_data_frame.columns = column_names
-
-        # Add units as metadata
-        results_data_frame.attrs["units"] = units
+        # As of tRIBS v6.0.0 the .mrf file is a single CSV header line followed by
+        # comma-delimited data rows (the separate units row has been removed).
+        results_data_frame = pd.read_csv(mrf_file, sep=',', header=0)
 
         # # update time from hourly time step to date
         starting_date = self.options["startdate"]["value"]
         date = self.convert_to_datetime(starting_date)
-        dt = pd.to_timedelta(results_data_frame['Time'], unit='h')
+        dt = pd.to_timedelta(results_data_frame['Time_hr'], unit='h')
         results_data_frame['Time'] = [date + step for step in dt]
 
         self.mrf['mrf'] = results_data_frame.iloc[0:int(self.options['runtime'][
@@ -172,7 +207,7 @@ class Read():
             DataFrame containing the results with an updated `Time` column reflecting datetime values.
         """
 
-        results_data_frame = pd.read_csv(element_results_file, sep=r"\s+", header=0)
+        results_data_frame = pd.read_csv(element_results_file, sep=',', header=0)
 
         # update time from hourly time step to date
         starting_date = self.options["startdate"]["value"]
@@ -269,15 +304,15 @@ class Read():
 
         df = pd.DataFrame({
             'Time': mrf['Time'],
-            'Unsat_mm': mrf['MSMU'].values * mrf['MDGW'].values * porosity,
-            'Sat_mm': (bedrock_depth-mrf['MDGW'])* porosity,
-            'CanopySWE_mm': 10 * mrf['AvInSn'].values,
-            'SWE_mm': 10 * mrf['AvSWE'].values,
+            'Unsat_mm': mrf['MSMU_[]'].values * mrf['MDGW_mm'].values * porosity,
+            'Sat_mm': (bedrock_depth-mrf['MDGW_mm'])* porosity,
+            'CanopySWE_mm': 10 * mrf['AvInSn_cm'].values,
+            'SWE_mm': 10 * mrf['AvSWE_cm'].values,
             'Canop_mm': 0,  # not average canopy  storage
-            'P_mm_h': mrf['MAP'],
-            'ET_mm_h': mrf['MET'] - 10 * (mrf['AvSnSub'] + mrf['AvSnEvap'] + mrf['AvInSu']),
-            'Qsurf_mm_h': mrf['Srf'] * 3600 * 1000 / drainage_area,
-            'Qunsat_mm_h': mrf['Qunsat'],  # assumed zero, but not sure if correct?
+            'P_mm_h': mrf['MAP_mm_hr'],
+            'ET_mm_h': mrf['MET_mm'] - 10 * (mrf['AvSnSub_cm'] + mrf['AvSnEvap_cm'] + mrf['AvInSu_cm']),
+            'Qsurf_mm_h': mrf['Srf_m3_s'] * 3600 * 1000 / drainage_area,
+            'Qunsat_mm_h': mrf['Qunsat_mm_hr'],  # assumed zero, but not sure if correct?
             'Qsat_mm_h': 0  # assumed zero, but not sure if correct?
         })
 

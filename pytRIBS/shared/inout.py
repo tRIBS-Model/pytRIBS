@@ -1,4 +1,5 @@
 import os
+import collections
 from datetime import datetime
 import getpass
 import geopandas as gpd
@@ -6,7 +7,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 import math
-from shapely.geometry import Point
+from shapely.geometry import Point, LineString, Polygon
 import json
 
 
@@ -71,225 +72,666 @@ class InOut:
                 z, bc = row['elevation'], int(row['bc'])
                 file.write(f"{x} {y} {z} {bc}\n")
 
-    def write_input_file(self, output_file_path, detailed=False):
+    @staticmethod
+    def write_mesh_files(output_prefix, output_path, vertices, triangles, node_codes):
         """
-        Writes .in file for tRIBS model simulation.
-        :param self:
-        :param output_file_path: Location to write input file to.
-        :param detailed: Option to print input file with option descriptions and related info.
+        Write the four tRIBS mesh files describing a complete, pre-triangulated TIN.
+
+        Produces ``{output_path}{output_prefix}.z``, ``.nodes``, ``.edges`` and
+        ``.tri``. Together these fully specify the mesh connectivity (node spokes,
+        directed edges with CCW ``nextid`` ordering, and per-triangle edge and
+        neighbour tables) so that tRIBS can read the mesh directly without running
+        the meshbuilder.
+
+        Parameters
+        ----------
+        output_prefix : str
+            Base name for the four output files (without extension).
+        output_path : str
+            Directory prefix prepended to ``output_prefix``. Should include a
+            trailing separator (e.g. ``'data/model/mesh/'``).
+        vertices : numpy.ndarray
+            Array of shape (nnodes, 3) of node x, y, z coordinates.
+        triangles : numpy.ndarray
+            Array of shape (ntri, 3) of node indices for each triangle.
+        node_codes : array_like
+            Per-node boundary code (0=interior, 1=boundary, 2=outlet, 3=stream).
+
+        Returns
+        -------
+        None
         """
-        if detailed:
-            tags = ['time', 'mesh', 'flow', 'hydro', 'spatial', 'meterological', 'output', 'forecast', 'stochastic',
-                    'restart', 'parallel']
-            headers = {'time': 'Time Variables', 'mesh': 'Mesh Options', 'flow': 'Routing Variables',
-                       'hydro': 'Hydrologic Processes',
-                       'spatial': 'Spatial Data Inputs', 'meterological': 'Meterological Options and Data',
-                       'output': 'Model Output Paths and Options',
-                       'forecast': 'Forecast Mode', 'stochastic': 'Stochastic Mode', 'restart': 'Restart Mode',
-                       'parallel': 'Parallel Mode'}
+        print("\n--- Preparing to write tRIBS mesh files ---")
+        nnodes, ntri = len(vertices), len(triangles)
 
-            meta = "This is a template input file for tRIBS 5.2.0. The file is divided in sections mirroring documentation\n" + \
-                   "found at: https://tribshms.readthedocs.io/en/latest/man/Model%20Input%20File.html#input-file-options\n" + \
-                   "Some values are already provided in the line following the keyword, where keywords are shown in all caps.\n" + \
-                   "Where values are not provided are marked by the string \"Update!\". Following the value is a short description of \n" + \
-                   "what the keyword does, alongside available options. Note: only values required by given a option must be specified.\n\n"
+        # Ensure CCW winding
+        for i in range(ntri):
+            p0, p1, p2 = triangles[i]
+            area = 0.5 * (
+                vertices[p0, 0] * (vertices[p1, 1] - vertices[p2, 1]) +
+                vertices[p1, 0] * (vertices[p2, 1] - vertices[p0, 1]) +
+                vertices[p2, 0] * (vertices[p0, 1] - vertices[p1, 1])
+            )
+            if area < 0:
+                triangles[i] = [p0, p2, p1]
 
-            current_datetime = datetime.now()
-            current_user = getpass.getuser()
+        undirected_edges = {
+            tuple(sorted((tri[i], tri[(i + 1) % 3])))
+            for tri in triangles for i in range(3)
+        }
+        edge_list, directed_edge_to_id = [], {}
+        for p1, p2 in sorted(undirected_edges):
+            directed_edge_to_id[(p1, p2)] = len(edge_list); edge_list.append([p1, p2])
+            directed_edge_to_id[(p2, p1)] = len(edge_list); edge_list.append([p2, p1])
+        nedges = len(edge_list)
 
-            formatted_datetime = current_datetime.strftime("%Y-%m-%d %H:%M:%S")
+        spokes = collections.defaultdict(list)
+        for i, edge in enumerate(edge_list):
+            spokes[edge[0]].append(i)
 
-            with open( output_file_path, 'w') as file:
+        node_edgid = -np.ones(nnodes, dtype=int)
+        edge_nextid = -np.ones(nedges, dtype=int)
 
-                file.write(f"Created by: {current_user}\n")
-                file.write(f"On: {formatted_datetime}\n\n")
+        for node_id, edge_ids in spokes.items():
+            angles = [
+                (np.arctan2(
+                    vertices[edge_list[eid][1], 1] - vertices[node_id, 1],
+                    vertices[edge_list[eid][1], 0] - vertices[node_id, 0]
+                ), eid)
+                for eid in edge_ids
+            ]
+            angles.sort()
+            sorted_eids = [eid for _, eid in angles]
+            node_edgid[node_id] = sorted_eids[0]
+            for i in range(len(sorted_eids)):
+                edge_nextid[sorted_eids[i]] = sorted_eids[(i + 1) % len(sorted_eids)]
 
-                string = 'Input File Template for tRIBS Version 5.3.0'
-                underline = '=' * len(string)
-                file.write(f'{underline}\n{string}\n{underline}\n\n')
-                file.write(meta)
+        undirected_edge_to_tris = collections.defaultdict(list)
+        for i, tri in enumerate(triangles):
+            for j in range(3):
+                key = tuple(sorted((tri[j], tri[(j + 1) % 3])))
+                undirected_edge_to_tris[key].append(i)
 
-                for tag in tags:
-                    underline = '=' * len(f'Section: {headers[tag]}')
-                    file.write(f'{underline}\nSection: {headers[tag]}\n{underline}\n\n')
-                    result = [item for item in self.options.values() if
-                              any(tag in _tag for _tag in item.get("tags", []))]
+        tri_neighbors = -np.ones((ntri, 3), dtype=int)
+        for i, tri in enumerate(triangles):
+            for j in range(3):
+                key = tuple(sorted((tri[j], tri[(j + 1) % 3])))
+                nbrs = undirected_edge_to_tris[key]
+                if len(nbrs) == 2:
+                    tri_neighbors[i, j] = nbrs[1] if nbrs[0] == i else nbrs[0]
 
-                    for dictionary in result:
-                        keyword = dictionary['keyword']
-                        file.write(f'{keyword}\n')
-                        val = dictionary['value']
-                        if val is not None:
-                            file.write(f"{dictionary['value']}\n\n")
-                        else:
-                            file.write(f"Update!\n\n")
+        with open(f"{output_path}{output_prefix}.z", "w") as f:
+            f.write("0.000000\n")
+            f.write(f"{nnodes}\n")
+            np.savetxt(f, vertices[:, 2], fmt='%.6f')
 
-                        description = dictionary['describe']
-                        if description is not None:
-                            file.write(f"Description:\n{description}\n")
-                        else:
-                            file.write(f"None\n")
-                        file.write(f" \n")
-        else:
-            with open(output_file_path, 'w') as output_file:
+        with open(f"{output_path}{output_prefix}.nodes", "w") as f:
+            f.write("0.000000\n")
+            f.write(f"{nnodes}\n")
+            for i in range(nnodes):
+                if node_edgid[i] == -1:
+                    raise RuntimeError(f"Node {i} is isolated (no edges).")
+                f.write(f"{vertices[i, 0]:.6f} {vertices[i, 1]:.6f} {node_edgid[i]} {node_codes[i]}\n")
 
-                current_datetime = datetime.now()
-                current_user = getpass.getuser()
+        with open(f"{output_path}{output_prefix}.edges", "w") as f:
+            f.write("0.000000\n")
+            f.write(f"{nedges}\n")
+            for i in range(nedges):
+                f.write(f"{edge_list[i][0]} {edge_list[i][1]} {edge_nextid[i]}\n")
 
-                formatted_datetime = current_datetime.strftime("%Y-%m-%d %H:%M:%S")
+        with open(f"{output_path}{output_prefix}.tri", "w") as f:
+            f.write("0.000000\n")
+            f.write(f"{ntri}\n")
+            for i in range(ntri):
+                p0, p1, p2 = triangles[i]
+                n0 = tri_neighbors[i, 1]   # opposite p0 → shares edge p1-p2
+                n1 = tri_neighbors[i, 2]   # opposite p1 → shares edge p2-p0
+                n2 = tri_neighbors[i, 0]   # opposite p2 → shares edge p0-p1
+                e0 = directed_edge_to_id[(p0, p2)]  # origin=p0, dest=p2
+                e1 = directed_edge_to_id[(p1, p0)]  # origin=p1, dest=p0
+                e2 = directed_edge_to_id[(p2, p1)]  # origin=p2, dest=p1
+                f.write(f"{p0} {p1} {p2} {n0} {n1} {n2} {e0} {e1} {e2}\n")
 
-                output_file.write(f"Created by: {current_user}\n")
-                output_file.write(f"On: {formatted_datetime}\n\n")
+        print("\n--- All tRIBS mesh files have been generated successfully. ---")
 
-                for key, subdict in self.options.items():
-                    if "keyword" in subdict and "value" in subdict:
-                        keyword = subdict["keyword"]
-                        value = subdict["value"]
-                        if value is None:
-                            value = ""
-                        output_file.write(f"{keyword}\n")
-                        output_file.write(f"{value}\n\n")
-
-
-
-    def read_precip_sdf(self, file_path=None):
+    @staticmethod
+    def write_mesh_diagnostics(output_base, vertices, triangles, node_codes, crs=None):
         """
-        Returns list of precip stations, where information from each station is stored in a dictionary.
-        :param file_path: Reads from options["hydrometstations"]["value"], but can be separately specified.
-        :return: List of dictionaries.
-        """
+        Write diagnostic shapefiles for visual inspection of a generated mesh.
 
+        Produces three shapefiles: ``{output_base}_triangles.shp``,
+        ``{output_base}_nodes.shp`` and ``{output_base}_edges.shp``. Each feature
+        carries a ``code`` attribute (0=Interior, 1=Boundary, 2=Outlet, 3=Stream)
+        for checking that boundary, outlet and stream nodes are placed correctly.
+
+        Parameters
+        ----------
+        output_base : str
+            Base path (without extension) for the three shapefiles.
+        vertices : numpy.ndarray
+            Array of shape (nnodes, 3) of node x, y, z coordinates.
+        triangles : numpy.ndarray
+            Array of shape (ntri, 3) of node indices for each triangle.
+        node_codes : array_like
+            Per-node boundary code (0=interior, 1=boundary, 2=outlet, 3=stream).
+        crs : optional
+            Coordinate reference system passed through to GeoPandas.
+
+        Returns
+        -------
+        None
+        """
+        print(f"\n--- Writing diagnostic shapefiles to {output_base}_*.shp ---")
+
+        polys, tri_codes = [], []
+        for tri_indices in triangles:
+            polys.append(Polygon(vertices[tri_indices][:, :2]))
+            codes_in_tri = node_codes[tri_indices]
+            if 2 in codes_in_tri:
+                tri_codes.append(2)
+            elif 3 in codes_in_tri:
+                tri_codes.append(3)
+            elif 1 in codes_in_tri:
+                tri_codes.append(1)
+            else:
+                tri_codes.append(0)
+        gpd.GeoDataFrame({'code': tri_codes}, geometry=polys, crs=crs).to_file(
+            f"{output_base}_triangles.shp", driver='ESRI Shapefile'
+        )
+
+        pts = [Point(v[0], v[1]) for v in vertices]
+        gpd.GeoDataFrame(
+            {'code': node_codes, 'elev': vertices[:, 2]},
+            geometry=pts, crs=crs
+        ).to_file(f"{output_base}_nodes.shp", driver='ESRI Shapefile')
+
+        _priority = {0: 1, 1: 2, 3: 0, 2: 3}
+        seen = set()
+        edge_lines, edge_codes = [], []
+        for tri in triangles:
+            for k in range(3):
+                i, j = tri[k], tri[(k + 1) % 3]
+                key = (min(i, j), max(i, j))
+                if key in seen:
+                    continue
+                seen.add(key)
+                edge_lines.append(LineString([vertices[i, :2], vertices[j, :2]]))
+                ci, cj = int(node_codes[i]), int(node_codes[j])
+                edge_codes.append(ci if _priority.get(ci, 0) >= _priority.get(cj, 0) else cj)
+        gpd.GeoDataFrame({'code': edge_codes}, geometry=edge_lines, crs=crs).to_file(
+            f"{output_base}_edges.shp", driver='ESRI Shapefile'
+        )
+        print(f"  Wrote {len(polys)} triangles, {len(pts)} nodes, {len(edge_lines)} edges.")
+
+    @staticmethod
+    def _read_tribs_list(filepath):
+        """Read a tRIBS list file (header float, count, then ``count`` data rows).
+
+        Returns ``(count, data_lines)`` where ``data_lines`` is a list of the
+        non-empty data rows (header and count lines stripped).
+        """
+        with open(filepath) as f:
+            lines = [ln.strip() for ln in f if ln.strip() != ""]
+        if len(lines) < 2:
+            raise ValueError(f"{filepath} is too short to be a tRIBS list file.")
+        count = int(float(lines[1]))      # lines[0] is a header float, lines[1] the count
+        data = lines[2:2 + count]
+        if len(data) != count:
+            raise ValueError(
+                f"{filepath}: header declares {count} rows but found {len(data)}."
+            )
+        return count, data
+
+    @staticmethod
+    def read_mesh_files(prefix, path=""):
+        """
+        Read the four tRIBS mesh files (``.nodes``/``.z``/``.tri``/``.edges``) back into arrays.
+
+        This is the inverse of :meth:`write_mesh_files`: it parses the on-disk mesh
+        that tRIBS reads under ``OPTMESHINPUT`` = 1, so the actual mesh can be
+        inspected or validated independently of how it was generated.
+
+        Parameters
+        ----------
+        prefix : str
+            Base name of the four files (without extension).
+        path : str, optional
+            Directory prefix prepended to ``prefix`` (include a trailing separator,
+            e.g. ``'data/model/mesh/'``). Default ``''``.
+
+        Returns
+        -------
+        dict
+            ``vertices`` (nnodes, 3) x, y, z; ``triangles`` (ntri, 3) node indices;
+            ``node_codes`` (nnodes,) boundary codes (0=interior, 1=closed boundary,
+            2=outlet, 3=stream); ``node_edgid`` (nnodes,) the node's first spoke edge
+            id; and ``edges`` (nedges, 3) directed ``[origin, dest, nextid]`` rows.
+        """
+        base = f"{path}{prefix}"
+        _, node_lines = InOut._read_tribs_list(base + ".nodes")
+        _, z_lines = InOut._read_tribs_list(base + ".z")
+        _, tri_lines = InOut._read_tribs_list(base + ".tri")
+        _, edge_lines = InOut._read_tribs_list(base + ".edges")
+
+        node_tok = [ln.split() for ln in node_lines]
+        xy = np.array([[float(t[0]), float(t[1])] for t in node_tok])
+        node_edgid = np.array([int(t[2]) for t in node_tok])
+        node_codes = np.array([int(t[3]) for t in node_tok])
+        z = np.array([float(ln.split()[0]) for ln in z_lines])
+
+        if not (len(xy) == len(z)):
+            raise ValueError(
+                f"Node/elevation count mismatch: {len(xy)} nodes vs {len(z)} elevations."
+            )
+
+        vertices = np.column_stack([xy, z])
+        triangles = np.array([[int(v) for v in ln.split()[:3]] for ln in tri_lines])
+        edges = np.array([[int(v) for v in ln.split()[:3]] for ln in edge_lines])
+
+        print(f"  Read mesh '{base}': {len(vertices)} nodes, {len(triangles)} triangles, "
+              f"{len(edges)} directed edges.")
+        return {"vertices": vertices, "triangles": triangles,
+                "node_codes": node_codes, "node_edgid": node_edgid, "edges": edges}
+
+    def write_input_file(self, output_file_path):
+        """
+        Writes .in file for tRIBS model simulation, organized into sections
+        matching the tRIBS input file template format.
+        :param output_file_path: Path to write input file to.
+        """
+        SECTION_TITLES = {
+            1: "Section 1: Model Run Parameters",
+            2: "Section 2: Model Run Options",
+            3: "Section 3: Model Input Files and Pathnames",
+            4: "Section 4: Model Modes",
+            5: "Section 5: Restart Mode Options",
+            6: "Section 6: Parallel Mode Options",
+        }
+
+        HEADER = (
+            "##############################################################################\n"
+            "##\n"
+            "##                    tRIBS Distributed Hydrologic Model\n"
+            "##\n"
+            "##              TIN-based Real-time Integrated Basin Simulator\n"
+            "##                       Ralph M. Parsons Laboratory\n"
+            "##                  Massachusetts Institute of Technology\n"
+            "##\n"
+            "##############################################################################\n"
+        )
+
+        def _options_block(entries):
+            """Build ## comment lines for keywords that have enumerated options."""
+            has_options = [e for e in entries
+                           if len([l for l in (e.get('describe') or '').split('\n') if l.strip()]) > 1]
+            if not has_options:
+                return []
+            col = max(len(f"##  {e['keyword']}") for e in has_options) + 3
+            lines = []
+            for entry in has_options:
+                describe = entry.get('describe') or ''
+                opt_lines = [l for l in describe.split('\n') if l.strip()][1:]
+                prefix = f"##  {entry['keyword']}".ljust(col)
+                indent = "##" + " " * (col - 2)
+                lines.append(f"{prefix}{opt_lines[0]}\n")
+                for opt in opt_lines[1:]:
+                    lines.append(f"{indent}{opt}\n")
+                lines.append("##\n")
+            return lines
+
+        def _section_header(title, option_lines=None):
+            parts = [
+                "\n##=========================================================================\n",
+                "##\n##\n",
+                f"##\t\t\t{title}\n",
+                "##\n##\n",
+            ]
+            if option_lines:
+                parts.extend(option_lines)
+            parts.append("##=========================================================================\n\n")
+            return ''.join(parts)
+
+        def _write_entry(f, entry):
+            keyword = entry['keyword']
+            describe = entry.get('describe') or ''
+            inline = describe.split('\n')[0] if describe else ''
+            value = entry.get('value')
+            if value is None:
+                value = ''
+            f.write(f"{keyword:<26}{inline}\n")
+            f.write(f"{value}\n\n")
+
+        # Group entries by section/subsection, preserving insertion order
+        section_data = {}
+        extras = []
+        for entry in self.options.values():
+            sec = entry.get('section')
+            if sec is None:
+                extras.append(entry)
+            else:
+                subsec = entry.get('subsection') or ''
+                if sec not in section_data:
+                    section_data[sec] = {}
+                if subsec not in section_data[sec]:
+                    section_data[sec][subsec] = []
+                section_data[sec][subsec].append(entry)
+
+        with open(output_file_path, 'w') as f:
+            f.write(HEADER)
+
+            for sec_num in sorted(section_data):
+                title = SECTION_TITLES.get(sec_num, f"Section {sec_num}")
+                all_entries = [e for sub in section_data[sec_num].values() for e in sub]
+                opt_lines = _options_block(all_entries)
+                f.write(_section_header(title, opt_lines if opt_lines else None))
+
+                for subsec, entries in section_data[sec_num].items():
+                    if subsec:
+                        f.write(f"## {subsec}\n## {'-' * len(subsec)}\n\n")
+                    for entry in entries:
+                        _write_entry(f, entry)
+                    if subsec:
+                        f.write('\n')
+
+            if extras:
+                f.write(_section_header("Additional Options"))
+                for entry in extras:
+                    _write_entry(f, entry)
+
+            f.write(
+                "\n##=========================================================================\n"
+                "##\n##\n"
+                "##\t\t\t\tEnd\n"
+                "##\n##\n"
+                "##=========================================================================\n"
+            )
+
+    @staticmethod
+    def create_snow_params():
+        """
+        Creates a dictionary of snow module parameters with default values, mirroring
+        the structure of create_input_file(). Called at Model initialization and stored
+        as self.snow_options. Parameters can be set the same way as main input keywords:
+
+        >>> model.irreducible_sat['value'] = 0.02
+
+        :return: dict of snow parameters keyed by lowercase parameter name.
+        """
+        return {
+            'irreducible_sat':         {'keyword': 'IRREDUCIBLE_SAT:',         'describe': 'Irreducible water saturation (Volumetric fraction of Pore Space)',                                  'value': 0.01,   'section': 'General Snow Parameters'},
+            'k_sat_ref':               {'keyword': 'K_SAT_REF:',               'describe': 'Saturated hydraulic conductivity of snowpack (m/s)',                                                'value': 0.0001, 'section': 'General Snow Parameters'},
+            'min_snow_temp':           {'keyword': 'MIN_SNOW_TEMP:',           'describe': 'Minimum temperature of snow (Celsius)',                                                              'value': -27,    'section': 'General Snow Parameters'},
+            'fresh_snow_density':      {'keyword': 'FRESH_SNOW_DENSITY:',      'describe': 'Fresh snow density baseline (kg/m^3)',                                                               'value': 60,     'section': 'General Snow Parameters'},
+            'canopy_wind_attenuation': {'keyword': 'CANOPY_WIND_ATTENUATION:', 'describe': 'Coefficient of exponential wind attenuation by canopy (Dimensionless)',                             'value': 0.4,    'section': 'General Snow Parameters'},
+            'roughness_length':        {'keyword': 'ROUGHNESS_LENGTH:',        'describe': 'Aerodynamic roughness length (z0) of the snow surface (m)',                                         'value': 0.04,   'section': 'General Snow Parameters'},
+            'albedo_fresh':            {'keyword': 'ALBEDO_FRESH:',            'describe': 'Fresh snow albedo',                                                                                  'value': 0.85,   'section': 'Albedo Parameters'},
+            'albedo_decay_dry':        {'keyword': 'ALBEDO_DECAY_DRY:',        'describe': 'Exponential decay rate of albedo for dry snow',                                                     'value': 0.96,   'section': 'Albedo Parameters'},
+            'albedo_decay_wet':        {'keyword': 'ALBEDO_DECAY_WET:',        'describe': 'Exponential decay rate of albedo for wet snow',                                                     'value': 0.82,   'section': 'Albedo Parameters'},
+            'albedo_min':              {'keyword': 'ALBEDO_MIN:',              'describe': 'Minimum snow albedo which snow cannot decay below',                                                  'value': 0.2,    'section': 'Albedo Parameters'},
+            'albedo_reset_threshold':  {'keyword': 'ALBEDO_RESET_THRESHOLD:',  'describe': 'Minimum snowfall depth required to reset the age of snow surface (mm)',                             'value': 0.5,    'section': 'Albedo Parameters'},
+            'optprecpartition':        {'keyword': 'OPTPRECPARTITION:',        'describe': 'Option for precipitation partitioning scheme\n0  Wet-bulb temperature threshold\n1  Linear transition between min/max temperature', 'value': 0, 'section': 'Precipitation Phase Partitioning Parameters'},
+            'max_wetbulb_temp':        {'keyword': 'MAX_WETBULB_TEMP:',        'describe': 'Upper wet-bulb temperature at which snowfall can occur for OPTPRECPARTITION 0 (Celsius)',           'value': 5,      'section': 'Precipitation Phase Partitioning Parameters'},
+            'min_temp_rain':           {'keyword': 'MIN_TEMP_RAIN:',           'describe': 'Minimum air temperature at which liquid precipitation can occur for OPTPRECPARTITION 1 (Celsius)',  'value': 0,      'section': 'Precipitation Phase Partitioning Parameters'},
+            'max_temp_snow':           {'keyword': 'MAX_TEMP_SNOW:',           'describe': 'Maximum air temperature at which snowfall can occur for OPTPRECPARTITION 1 (Celsius)',              'value': 4,      'section': 'Precipitation Phase Partitioning Parameters'},
+        }
+
+    def write_snow_params(self, output_file_path='data/model/snow_params.spf'):
+        """
+        Writes a tRIBS snow parameter file (*.spf) from self.snow_options and automatically
+        sets the SNOWFILENAME input option to the written file path. This method is only
+        needed when the snow module is enabled (OPTSNOW: 1).
+
+        Parameter values are set the same way as main input file keywords, via self.snow_options:
+
+        Example
+        -------
+        >>> from pytRIBS.classes import Model
+        >>> m = Model()
+
+        >>> # Adjust parameters before writing
+        >>> m.irreducible_sat['value'] = 0.02
+        >>> m.albedo_fresh['value'] = 0.90
+        >>> m.write_snow_params('data/model/snow_params.spf')
+
+        :param output_file_path: Path to write the snow parameter file to. Defaults to
+            'data/model/snow_params.spf', matching the standard project directory structure
+            created by the Project class. If you are not using the default project structure,
+            provide the full path explicitly.
+        """
+        section_data = {}
+        for entry in self.snow_options.values():
+            sec = entry['section']
+            if sec not in section_data:
+                section_data[sec] = []
+            section_data[sec].append(entry)
+
+        with open(output_file_path, 'w') as f:
+            for section, entries in section_data.items():
+                f.write(f"## {section}\n## {'-' * len(section)}\n\n")
+                for entry in entries:
+                    inline = entry['describe'].split('\n')[0]
+                    f.write(f"{entry['keyword']:<26}{inline}\n")
+                    f.write(f"{entry['value']}\n\n")
+
+        self.options['snowfilename']['value'] = output_file_path
+
+    def read_snow_params(self, file_path=None):
+        """
+        Reads a tRIBS snow parameter file (*.spf) and assigns values to self.snow_options.
+        The *.spf file shares the same keyword/value format as the main input file, so the
+        parsing mirrors read_input_file().
+
+        :param file_path: Path to the *.spf file. Defaults to options['snowfilename']['value'],
+            which is set when the main input file is read or when write_snow_params() is called.
+        """
         if file_path is None:
-            file_path = self.options["gaugestations"]["value"]
+            file_path = self.options['snowfilename']['value']
 
-            if file_path is None:
-                print(self.options["gaugestations"]["key_word"] + "is not specified.")
+            if not file_path:
+                print(self.options['snowfilename']['keyword'] + " is not specified.")
                 return None
 
+        with open(file_path, 'r') as file:
+            lines = file.readlines()
+
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            line_lower = line.lower()
+            for key, entry in self.snow_options.items():
+                keyword_lower = entry['keyword'].lower()
+                if line_lower.startswith(keyword_lower) and i + 1 < len(lines):
+                    self.snow_options[key]['value'] = lines[i + 1].strip()
+            i += 1
+
+    @staticmethod
+    def read_sdf(file_path):
+        """
+        Reads a tRIBS station descriptor file (*.sdf) and returns a list of station
+        dictionaries. Both the precipitation and hydrometeorological station files share this
+        format: a single descriptive header line that tRIBS skips, followed by comma-delimited
+        rows of ID,DataFile,Northing,Easting,Elevation:
+
+        ID,DataFile,Northing,Easting,Elevation
+        1,data/model/precip/precip_U.mdf,3891469.290931,400109.778323,2188.5
+
+        :param file_path: Path to the *.sdf file.
+        :return: List of dictionaries, one per station, with keys 'station_id', 'file_path',
+            'y' (northing), 'x' (easting), and 'elevation'.
+        """
         station_list = []
 
         with open(file_path, 'r') as file:
             lines = file.readlines()
 
-        metadata = lines.pop(0)
-        num_stations, num_parameters = map(int, metadata.strip().split())
+        lines.pop(0)  # discard the descriptive header line (skipped by tRIBS)
 
         for l in lines:
-            station_info = l.strip().split()
-            if len(station_info) == 7:
-                station_id, file_path, lat, long, record_length, num_params, elevation = station_info
-                station = {
-                    "station_id": station_id,
-                    "file_path": file_path,
-                    "y": float(lat),
-                    "x": float(long),
-                    "record_length": int(record_length),
-                    "num_parameters": int(num_params),
-                    "elevation": float(elevation)
-                }
-                station_list.append(station)
+            if not l.strip():
+                continue
 
-        if len(station_list) != num_stations:
-            print("Error: Number of stations does not match the specified count.")
+            info = [v.strip() for v in l.strip().split(',')]
+            if len(info) == 5:
+                station_id, data_file, northing, easting, elevation = info
+                station_list.append({
+                    "station_id": station_id,
+                    "file_path": data_file,
+                    "y": float(northing),
+                    "x": float(easting),
+                    "elevation": float(elevation)
+                })
+            else:
+                print(f"Skipping row in {file_path}: expected 5 comma-separated values, "
+                      f"got {len(info)}.")
 
         return station_list
+
+    def read_precip_sdf(self, file_path=None):
+        """
+        Returns list of precip stations read from the *.sdf referenced by the GAUGESTATIONS
+        option (or a separately specified file_path). See read_sdf for the file format.
+        :param file_path: Defaults to options["gaugestations"]["value"].
+        :return: List of dictionaries.
+        """
+        if file_path is None:
+            file_path = self.options["gaugestations"]["value"]
+
+            if file_path is None:
+                print(self.options["gaugestations"]["keyword"] + " is not specified.")
+                return None
+
+        return self.read_sdf(file_path)
 
     @staticmethod
     def read_precip_station(file_path):
         """
         Returns pandas dataframe of precipitation from a station specified by file_path.
-        :param file_path: Flat file with columns Y M D H R
+
+        Like tRIBS, columns are read by position, not by header name: the first line is
+        treated as a descriptive header and skipped, and the five columns are interpreted
+        as Year, Month, Day, Hour, R (mm) in that order regardless of the header labels.
+        :param file_path: tRIBS precip data file (*.mdf), comma-delimited with a header line
+            followed by columns in the order Year,Month,Day,Hour,R_mm.
         :return: Pandas dataframe
         """
         # TODO add var for specifying Station ID
-        df = pd.read_csv(file_path, header=0, sep=r"\s+")
-        df.rename(columns={'Y': 'year', 'M': 'month', 'D': 'day', 'H': 'hour'}, inplace=True)
+        names = ['year', 'month', 'day', 'hour', 'R']
+        df = pd.read_csv(file_path, header=0, sep=',')
+        if df.shape[1] != len(names):
+            raise ValueError(
+                f"{file_path}: expected {len(names)} columns "
+                f"(Year, Month, Day, Hour, R), found {df.shape[1]}")
+        df.columns = names
         df['date'] = pd.to_datetime(df[['year', 'month', 'day', 'hour']])
         df.drop(['year', 'month', 'day', 'hour'], axis=1, inplace=True)
 
         return df
 
     @staticmethod
-    def write_precip_sdf(station_list, output_file_path):
+    def write_sdf(station_list, output_file_path):
         """
-        Writes a list of precip stations to a flat file.
-        :param station_list: List of dictionaries containing station information.
-        :param output_file_path: Output flat file path.
+        Writes a list of station dictionaries to a tRIBS station descriptor file (*.sdf):
+        a single descriptive header line (skipped by tRIBS) followed by comma-delimited rows of
+        ID,DataFile,Northing,Easting,Elevation. Used for both precipitation and
+        hydrometeorological station files.
+
+        :param station_list: List of dictionaries with keys 'station_id', 'file_path',
+            'y' (northing), 'x' (easting), and 'elevation'.
+        :param output_file_path: Output *.sdf path.
         """
         with open(output_file_path, 'w') as file:
-            # Write metadata line
-            metadata = f"{len(station_list)} {len(station_list[0])}\n"
-            file.write(metadata)
-
-            # Write station information
+            file.write("ID,DataFile,Northing,Easting,Elevation\n")
             for station in station_list:
-                line = f"{station['station_id']} {station['file_path']} {station['y']} {station['x']} " \
-                       f"{station['record_length']} {station['num_parameters']} {station['elevation']}\n"
-                file.write(line)
+                file.write(f"{station['station_id']},{station['file_path']},"
+                           f"{station['y']},{station['x']},{station['elevation']}\n")
+
+    @staticmethod
+    def _write_station_stream(stations, sdf_path, station_writer, stream):
+        """
+        Shared core for writing a single forcing stream (met or precip): for each station,
+        write its data file (*.mdf) and collect a station descriptor entry, then write the
+        *.sdf. This is the single place that owns the on-disk file layout, so the NLDAS
+        download path and the user-provided-observation path produce identical formats.
+
+        Station IDs written to the *.sdf are assigned as integers starting at 1
+        (tRIBS-internal). Each *.mdf is named ``{stream}_{name}_{startYYYY}-{endYYYY}.mdf``,
+        where the year window is derived from the station's data and ``name`` is the station
+        label supplied by the caller.
+
+        :param stations: List of dicts, each ``{'name', 'x', 'y', 'elevation', 'data'}`` where
+            ``data`` is a DataFrame with a datetime 'date' column and the stream's variables.
+            Names must be unique across the list (each maps to a distinct *.mdf filename).
+        :param sdf_path: Output *.sdf path; the *.mdf files are written to its directory.
+        :param station_writer: Per-stream *.mdf writer, e.g. ``InOut.write_met_station`` or
+            ``InOut.write_precip_station``.
+        :param stream: Stream label used in the *.mdf filename, e.g. 'met' or 'precip'.
+        """
+        out_dir = os.path.dirname(sdf_path)
+        sdf_list = []
+
+        for station_id, station in enumerate(stations, start=1):
+            df = station['data']
+            start_year = df['date'].dt.year.min()
+            end_year = df['date'].dt.year.max()
+            mdf_name = f"{stream}_{station['name']}_{start_year}-{end_year}.mdf"
+            mdf_path = os.path.join(out_dir, mdf_name)
+
+            # Copy so the per-stream writer never mutates the caller's DataFrame.
+            station_writer(df.copy(), mdf_path)
+
+            sdf_list.append({
+                'station_id': station_id,
+                'file_path': mdf_path,
+                'y': station['y'],
+                'x': station['x'],
+                'elevation': station['elevation'],
+            })
+
+        InOut.write_sdf(sdf_list, sdf_path)
+
+    @staticmethod
+    def write_precip_sdf(station_list, output_file_path):
+        """
+        Writes a list of precip stations to a *.sdf file. See write_sdf for the file format.
+        :param station_list: List of dictionaries containing station information.
+        :param output_file_path: Output *.sdf path.
+        """
+        InOut.write_sdf(station_list, output_file_path)
 
     @staticmethod
     def write_precip_station(df, output_file_path):
         """
-        Converts a DataFrame with 'date' and 'R' columns to flat file format with columns Y M D H R.
+        Converts a DataFrame with 'date' and 'R' columns to the tRIBS precip data file
+        (*.mdf) format: comma-delimited with header Year,Month,Day,Hour,R_mm.
         :param df: Pandas DataFrame with 'date' and 'R' columns.
-        :param output_file_path: Output flat file path.
+        :param output_file_path: Output *.mdf path.
         """
-        # Extract Y, M, D, and H from the 'date' column
-        df['Y'] = df['date'].dt.year
-        df['M'] = df['date'].dt.month
-        df['D'] = df['date'].dt.day
-        df['H'] = df['date'].dt.hour
+        # Extract Year, Month, Day, and Hour from the 'date' column
+        df['Year'] = df['date'].dt.year
+        df['Month'] = df['date'].dt.month
+        df['Day'] = df['date'].dt.day
+        df['Hour'] = df['date'].dt.hour
 
-        # Reorder columns
-        df = df[['Y', 'M', 'D', 'H', 'R']]
+        df = df[['Year', 'Month', 'Day', 'Hour', 'R']].rename(columns={'R': 'R_mm'})
 
         # Write DataFrame to flat file
-        df.to_csv(output_file_path, sep=' ', index=False)
+        df.to_csv(output_file_path, sep=',', index=False)
 
     def read_met_sdf(self, file_path=None):
         """
-        Returns list of met stations, where information from each station is stored in a dictionary.
-        :param file_path: Reads from options["hydrometstations"]["value"], but can be separately specified.
+        Returns list of met stations read from the *.sdf referenced by the HYDROMETSTATIONS
+        option (or a separately specified file_path). See read_sdf for the file format.
+        :param file_path: Defaults to options["hydrometstations"]["value"].
         :return: List of dictionaries.
         """
         if file_path is None:
             file_path = self.options["hydrometstations"]["value"]
 
             if file_path is None:
-                print(self.options["hydrometstations"]["key_word"] + "is not specified.")
+                print(self.options["hydrometstations"]["keyword"] + " is not specified.")
                 return None
 
-        station_list = []
-
-        with open(file_path, 'r') as file:
-            lines = file.readlines()
-
-        metadata = lines.pop(0)
-        num_stations, num_parameters = map(int, metadata.strip().split())
-
-        for l in lines:
-            station_info = l.strip().split()
-
-            if len(station_info) == 10:
-                station_id, file_path, lat, y, long, x, gmt, record_length, num_params, other = station_info
-                station = {
-                    "station_id": station_id,
-                    "file_path": file_path,
-                    "lat_dd": float(lat),
-                    "x": float(x),
-                    "long_dd": float(long),
-                    "y": float(y),
-                    "GMT": int(gmt),
-                    "record_length": int(record_length),
-                    "num_parameters": int(num_params),
-                    "other": other
-                }
-                station_list.append(station)
-
-        if len(station_list) != num_stations:
-            print("Error: Number of stations does not match the specified count.")
-
-        return station_list
+        return self.read_sdf(file_path)
 
     @staticmethod
     def read_met_station(file_path):
@@ -299,91 +741,109 @@ class InOut:
         Parameters
         ----------
         file_path : str
-            Path to the meteorological station data file. The file should be in a space-separated format with columns for
-            year, month, day, and hour.
+            Path to the *.mdf file. The file is comma-delimited with a header line followed
+            by columns in the order
+            Year,Month,Day,Hour,PA_mb,RH_pct,XC_tenths,US_m/s,TA_C,IS_W/m2,TS_C.
 
         Returns
         -------
         pandas.DataFrame
-            A DataFrame containing the meteorological data with a single 'date' column as a datetime index, and the remaining
-            columns from the input file.
+            A DataFrame with a single 'date' column built from Year/Month/Day/Hour, and the
+            meteorological variables under their short names: PA, RH, XC, US, TA, IS, TS.
 
         Notes
         -----
-        - The function expects the input file to have columns 'Y', 'M', 'D', and 'H' for year, month, day, and hour, respectively.
-        - The columns for year, month, day, and hour are converted into a single 'date' column of datetime type.
-        - The original columns 'Y', 'M', 'D', and 'H' are dropped from the DataFrame after the datetime conversion.
+        - Like tRIBS, columns are read by position, not by header name: the first line is
+          treated as a descriptive header and skipped, and the columns are interpreted in the
+          fixed order above regardless of the header labels.
+        - Year/Month/Day/Hour are combined into a single 'date' column and dropped.
         """
-        # TODO add var for specifying Station ID and doc
-        df = pd.read_csv(file_path, header=0, sep=r'\s+')
-        # convert year, month, day to datetime and drop columns
-        df.rename(columns={'Y': 'year', 'M': 'month', 'D': 'day', 'H': 'hour'}, inplace=True)
+        names = ['year', 'month', 'day', 'hour', 'PA', 'RH', 'XC', 'US', 'TA', 'IS', 'TS']
+        df = pd.read_csv(file_path, header=0, sep=',')
+        if df.shape[1] != len(names):
+            raise ValueError(
+                f"{file_path}: expected {len(names)} columns (Year, Month, Day, Hour, "
+                f"PA, RH, XC, US, TA, IS, TS), found {df.shape[1]}")
+        df.columns = names
         df['date'] = pd.to_datetime(df[['year', 'month', 'day', 'hour']])
         df = df.drop(['year', 'month', 'day', 'hour'], axis=1)
         return df
+
     @staticmethod
     def write_met_station(df, output_file_path):
         """
-        Converts a DataFrame with 'date' and 'PA','TD' or 'RH' or 'VP','XC','US','TA','TS','NR' columns to flat file format.
-        See tRIBS documentation for more details on weather station data structure (i.e. *mdf files).
-        :param df: Pandas DataFrame with 'date' and 'R' columns.
-        :param output_file_path: Output flat file path.
+        Converts a DataFrame with a 'date' column and meteorological variables to the tRIBS 
+         meteorological data file (*.mdf) format: comma-delimited with the header
+        Year,Month,Day,Hour,PA_mb,RH_pct,XC_tenths,US_m/s,TA_C,IS_W/m2,TS_C.
+
+        Relative humidity (RH) is the only accepted humidity input in v6.0.0; the pre-v6.0.0
+        TD/VP alternatives and the unused net radiation (NR) column have been removed. Cloud
+        cover (XC) and surface temperature (TS) are required columns but are typically 9999.99;
+        if absent from df they are written as 9999.99.
+
+        :param df: Pandas DataFrame with a 'date' column and at least 'PA', 'RH', 'US', 'TA',
+            and 'IS' columns.
+        :param output_file_path: Output *.mdf path.
         """
-        # Extract Y, M, D, and H from the 'date' column
-        df['Y'] = df['date'].dt.year
-        df['M'] = df['date'].dt.month
-        df['D'] = df['date'].dt.day
-        df['H'] = df['date'].dt.hour
+        if 'RH' not in df.columns:
+            print("Error: 'RH' (relative humidity) is required for the met data file.")
+            return
 
-        # Format 'D' and 'H' columns with zero-padding
-        df['D'] = df['D'].apply(lambda x: str(x).zfill(2))
-        df['H'] = df['H'].apply(lambda x: str(x).zfill(2))
+        df = df.copy()
 
-        # Check which column ('TD', 'RH', or 'VP') is present in the DataFrame
-        present_column = next((col for col in ['TD', 'RH', 'VP'] if col in df.columns), None)
+        # Extract Year, Month, Day, Hour from the 'date' column
+        df['Year'] = df['date'].dt.year
+        df['Month'] = df['date'].dt.month
+        df['Day'] = df['date'].dt.day
+        df['Hour'] = df['date'].dt.hour
 
-        if present_column is not None:
-            # Reorder columns
-            df = df[['Y', 'M', 'D', 'H', 'PA', present_column, 'XC', 'US', 'TA', 'IS', 'TS', 'NR']]
+        # XC and TS are required columns but are typically the 9999.99 fill value
+        if 'XC' not in df.columns:
+            df['XC'] = 9999.99
+        if 'TS' not in df.columns:
+            df['TS'] = 9999.99
 
-            # Write DataFrame to flat file with tab as separator
-            df.to_csv(output_file_path, sep='\t', index=False)
-        else:
-            print("Error: One of 'TD', 'RH', or 'VP' column must be present in the DataFrame.")
+        columns = ['Year', 'Month', 'Day', 'Hour', 'PA', 'RH', 'XC', 'US', 'TA', 'IS', 'TS']
+        header = 'Year,Month,Day,Hour,PA_mb,RH_pct,XC_tenths,US_m/s,TA_C,IS_W/m2,TS_C'
+
+        with open(output_file_path, 'w') as f:
+            f.write(header + '\n')
+            df[columns].to_csv(f, header=False, index=False)
 
 
     @staticmethod
-    def write_met_sdf(output_file_path, station_list):
+    def write_met_sdf(station_list, output_file_path):
         """
-        Writes a list of meteorological stations to a flat file (i.e. *.sdf file).
-        :param station_list: List of dictionaries containing station information.
-        :param output_file_path: Output flat file path.
-        """
-        with open(output_file_path, 'w') as file:
-            # Write metadata line
-            metadata = f"{len(station_list)} {len(station_list[0])}\n"
-            file.write(metadata)
+        Writes a list of meteorological stations to a *.sdf file. See write_sdf for the file
+        format.
 
-            # Write station information
-            for station in station_list:
-                line = f"{station['station_id']} {station['file_path']} {station['lat_dd']} {station['y']} {station['long_dd']} {station['x']} " \
-                       f"{station['GMT']} {station['record_length']} {station['num_parameters']} {station['other']}\n"
-                file.write(line)
+        Note: the argument order changed in v1.0.0 to (station_list, output_file_path) to match
+        write_precip_sdf.
+
+        :param station_list: List of dictionaries containing station information.
+        :param output_file_path: Output *.sdf path.
+        """
+        InOut.write_sdf(station_list, output_file_path)
 
     def read_landuse_table(self, file_path=None):
         """
         Returns list of dictionaries for each type of landuse specified in the .ldt file.
 
-        Land Use Reclassification Table Structure (*.ldt, see tRIBS documentation for more details)
-        #Types	#Params
-        ID	a	b1	 P	S	K	b2	Al	 h	Kt	Rs	V LAI theta*_s theta*_t
+        Land Use Reclassification Table Structure (*.ldt). The first line is a
+        descriptive, comma-delimited header that tRIBS skips; each following line is a
+        comma-delimited row of parameter values:
+
+        ID,P_[],S_mm,K_mm/hr,b2_1/mm,Al_[],h_m,Kt_[],Rs_s/m,V_[],LAI_[],Theta*s_[],Theta*t_[],RZD_m
+
+        RZD_m (root zone depth, m) must be present for every type; a value of 9999.99 tells
+        tRIBS to fall back to its internal default.
 
         """
         if file_path is None:
             file_path = self.landtablename["value"]
 
             if file_path is None:
-                print(self.landtablename["key_word"] + "is not specified.")
+                print(self.landtablename["keyword"] + " is not specified.")
                 return
 
         landuse_list = []
@@ -391,23 +851,19 @@ class InOut:
         with open(file_path, 'r') as file:
             lines = file.readlines()
 
-        metadata = lines.pop(0)
-        num_types, num_params = map(int, metadata.strip().split())
-        param_standard = 15
-
-        if num_params != param_standard:
-            print(f"The number parameters in {file_path} do not conform with standard landuse .sdt format.")
-            return
+        lines.pop(0)  # discard the descriptive header line (skipped by tRIBS)
+        param_standard = 14
 
         for l in lines:
-            land_info = l.strip().split()
+            if not l.strip():
+                continue
+
+            land_info = [v.strip() for v in l.strip().split(',')]
 
             if len(land_info) == param_standard:
-                _id, a, b_1, p, s, k, b_2, al, h, kt, rs, v, lai, tstar_s, tstar_t = land_info
+                _id, p, s, k, b_2, al, h, kt, rs, v, lai, tstar_s, tstar_t, rzd = land_info
                 station = {
                     "ID": _id,
-                    "a": a,
-                    "b1": b_1,
                     "P": p,
                     "S": s,
                     "K": k,
@@ -419,43 +875,65 @@ class InOut:
                     "V": v,
                     "LAI": lai,
                     "theta*_s": tstar_s,
-                    "theta*_t": tstar_t
+                    "theta*_t": tstar_t,
+                    "RZD_m": rzd
                 }
                 landuse_list.append(station)
+            else:
+                print(f"Skipping row in {file_path}: expected {param_standard} comma-separated "
+                      f"values, got {len(land_info)}.")
 
-        if len(landuse_list) != num_types:
-            print("Error: Number of land types does not match the specified count.")
+        if not landuse_list:
+            print(f"Warning: no land use entries were read from {file_path}. Confirm it is in the "
+                  f"tRIBS format (one descriptive header line, then comma-delimited rows). "
+                  f"Pre-v6.0.0 tables (a count line with whitespace-delimited rows) are not "
+                  f"compatible and must be converted.")
 
         return landuse_list
     @staticmethod
-    def write_landuse_table(landuse_list,file_path):
+    def write_landuse_table(landuse_list, file_path):
         """
-        Writes out Land Use Reclassification Table(*.ldt) file with the following format:
-        #Types	#Params
-        ID	a	b1	 P	S	K	b2	Al	 h	Kt	Rs	V LAI theta*_s theta*_t
+        Writes out a Land Use Reclassification Table (*.ldt) in the tRIBS format: a
+        single descriptive header line (skipped by tRIBS) followed by comma-delimited rows
+        of parameter values:
+
+        ID,P_[],S_mm,K_mm/hr,b2_1/mm,Al_[],h_m,Kt_[],Rs_s/m,V_[],LAI_[],Theta*s_[],Theta*t_[],RZD_m
+
+        Notes:
+        - The Gray (1970) interception parameters (a, b1) present in pre-v6.0.0 land use
+          tables have been removed. Tables written by this function are not compatible with
+          tRIBS versions prior to v6.0.0.
+        - RZD_m (root zone depth, m) must be present for every type. If a dictionary omits it,
+          9999.99 is written, which tells tRIBS to use its internal default.
 
         :param landuse_list: List of dictionaries containing land information specified by .ldt structure above.
-        :param file_path: Path to save *.sdt file.
+        :param file_path: Path to save *.ldt file.
         """
-        param_standard = 15
+        header = ("ID,P_[],S_mm,K_mm/hr,b2_1/mm,Al_[],h_m,Kt_[],Rs_s/m,V_[],LAI_[],"
+                  "Theta*s_[],Theta*t_[],RZD_m")
 
         with open(file_path, 'w') as file:
-            # Write metadata line
-            metadata = f"{len(landuse_list)} {param_standard}\n"
-            file.write(metadata)
+            file.write(header + "\n")
 
-            # Write station information
             for type in landuse_list:
-                line = f"{str(type['ID'])} {str(type['a'])} {str(type['b1'])} {str(type['P'])} {str(type['S'])} {str(type['K'])} " \
-                       f" {str(type['b2'])} {str(type['Al'])} {str(type['h'])} {str(type['Kt'])} {str(type['Rs'])} {str(type['V'])}" \
-                       f" {str(type['LAI'])} {str(type['theta*_s'])} {str(type['theta*_t'])}\n"
-                file.write(line)
+                row = [type['ID'], type['P'], type['S'], type['K'], type['b2'], type['Al'],
+                       type['h'], type['Kt'], type['Rs'], type['V'], type['LAI'],
+                       type['theta*_s'], type['theta*_t'], type.get('RZD_m', 9999.99)]
+                file.write(",".join(str(v) for v in row) + "\n")
 
     def read_grid_data_file(self, grid_type):
         """
-        Returns dictionary with content of a specified Grid Data File (.gdf)
-        :param grid_type: string set to "weather", "soil", of "land", with each corresponding to HYDROMETGRID, SCGRID, LUGRID
-        :return: dictionary containg keys and content: "Number of Parameters","Latitude", "Longitude","GMT Time Zone", "Parameters" (a  list of dicts)
+        Returns dictionary with content of a specified Grid Data File (.gdf).
+
+        The .gdf has a single descriptive header line that tRIBS skips,
+        followed by comma-delimited rows of Variable,BasePath,FileExtension:
+
+        Variable,BasePath,FileExtension
+        KS,data/model/soil/KS,asc
+        TS,data/model/soil/TS,asc
+
+        :param grid_type: string set to "weather", "soil", or "land", with each corresponding to HYDROMETGRID, SCGRID, LUGRID
+        :return: dictionary with keys "Number of Parameters" and "Parameters" (a list of dicts)
         """
 
         if grid_type == "weather":
@@ -468,85 +946,49 @@ class InOut:
         parameters = []
 
         with open(option, 'r') as file:
-            num_parameters = int(file.readline().strip())
-            location_info = file.readline().strip().split()
-            latitude, longitude, gmt_timezone = location_info
+            lines = file.readlines()
 
-            variable_count = 0
+        lines.pop(0)  # discard the descriptive header line (skipped by tRIBS)
 
-            for line in file:
-                parts = line.strip().split()
-                if len(parts) == 3:
-                    variable_name, raster_path, raster_extension = parts
-                    variable_count += 1
+        for line in lines:
+            if not line.strip():
+                continue
 
-                    # path_components = raster_path.split(os.path.sep)
-                    #
-                    # # Exclude the last directory as its actually base name
-                    # raster_path = os.path.sep.join(path_components[:-1])
-
-                    # if raster_path != "NO_DATA":
-                    #     if not os.path.exists(raster_path+'/'+raster_extension):
-                    #         print(
-                    #             f"Warning: Raster file not found for Variable '{variable_name}': {raster_path}")
-                    #         raster_path = None
-                    #     elif os.path.getsize(raster_path) == 0:
-                    #         print(
-                    #             f"Warning: Raster file is empty for Variable '{variable_name}': {raster_path}")
-                    #         raster_path = None
-                    # elif raster_path == "NO_DATA":
-                    #     print(
-                    #         f"Warning: No rasters set for variable '{variable_name}'")
-                    #     raster_path = None
-
-                    parameters.append({
-                        'Variable Name': variable_name,
-                        'Raster Path': raster_path,
-                        'Raster Extension': raster_extension
-                    })
-                else:
-                    print(f"Skipping invalid line: {line}")
-
-            if variable_count > num_parameters:
-                print(
-                    "Warning: The number of variables exceeds the number of parameters. This variable has been reset "
-                    "in dictionary.")
+            parts = [v.strip() for v in line.strip().split(',')]
+            if len(parts) == 3:
+                variable_name, raster_path, raster_extension = parts
+                parameters.append({
+                    'Variable Name': variable_name,
+                    'Raster Path': raster_path,
+                    'Raster Extension': raster_extension
+                })
+            else:
+                print(f"Skipping invalid line: {line}")
 
         return {
-            'Number of Parameters': variable_count,
-            'Latitude': latitude,
-            'Longitude': longitude,
-            'GMT Time Zone': gmt_timezone,
+            'Number of Parameters': len(parameters),
             'Parameters': parameters
         }
 
     @staticmethod
     def write_grid_data_file(grid_file, data):
         """
-        Writes the content of a dictionary to a specified Grid Data File (.gdf)
+        Writes the content of a dictionary to a specified Grid Data File (.gdf) in the tRIBS
+        format: a single descriptive header line (skipped by tRIBS) followed by
+        comma-delimited rows of Variable,BasePath,FileExtension.
+
         :param grid_file: path to write out grid file to.
-        :param data: dictionary containing keys and content: "Number of Parameters", "Latitude", "Longitude", "GMT Time Zone", "Parameters" (a list of dicts)
+        :param data: dictionary containing key "Parameters" (a list of dicts with keys
+            'Variable Name', 'Raster Path', 'Raster Extension')
         :return: None
         """
 
         with open(grid_file, 'w') as file:
-            # Write number of parameters
-            file.write(f"{data['Number of Parameters']}\n")
+            file.write("Variable,BasePath,FileExtension\n")
 
-            # Write location info (Latitude, Longitude, GMT Time Zone)
-            file.write(f"{data['Latitude']} {data['Longitude']} {data['GMT Time Zone']}\n")
-
-            # Write parameters
             for param in data['Parameters']:
-                variable_name = param['Variable Name']
-                raster_path = param['Raster Path']
-                raster_extension = param['Raster Extension']
-
-                # # Check if the raster path exists, and if it doesn't, set it to "NO_DATA"
-                # if not os.path.exists(os.path.join(raster_path, raster_extension)):
-                #     raster_path = "NO_DATA"
-
-                file.write(f"{variable_name} {raster_path} {raster_extension}\n")
+                file.write(f"{param['Variable Name']},{param['Raster Path']},"
+                           f"{param['Raster Extension']}\n")
 
     @staticmethod
     def read_ascii(file_path):
@@ -625,26 +1067,34 @@ class InOut:
 
         updated_lines = []
         replaced = False
-    
-        # Use enumerate to get the line number (i)
-        for i, line in enumerate(lines):
-            # Check if we are in the header (first 6 lines)
-            if i < 6:
+
+        def _is_number(s):
+            try:
+                float(s)
+                return True
+            except ValueError:
+                return False
+
+        for line in lines:
+            tokens = line.strip().split()
+            # Header lines (ncols, nrows, ..., NODATA_value) start with a non-numeric
+            # token. The header length varies, GDAL may write dx/dy in place of
+            # cellsize, so detect headers by content rather than by line count.
+            if tokens and not _is_number(tokens[0]):
                 if line.startswith("dx") or line.startswith("dy"):
                     if not replaced:
-                        updated_lines.append("cellsize " + str(math.ceil(float(line.split()[1]))) + "\n")
+                        updated_lines.append("cellsize " + str(math.ceil(float(tokens[1]))) + "\n")
                         replaced = True
                 else:
                     updated_lines.append(line)
-            # We are in the data part of the file (everything after line 5)
             else:
                 # Check if the user wants to format the numbers
                 if decimals is not None and isinstance(decimals, int):
                     # Create a format string, e.g., "%.0f" or "%.1f"
                     fmt = f"%.{decimals}f"
                     # Check for empty lines, which can happen at the end of files
-                    if line.strip():
-                        new_line = " ".join([fmt % float(n) for n in line.strip().split()]) + "\n"
+                    if tokens:
+                        new_line = " ".join([fmt % float(n) for n in tokens]) + "\n"
                         updated_lines.append(new_line)
                 else:
                     # If decimals is None, just add the original line back
@@ -655,15 +1105,30 @@ class InOut:
             file.writelines(updated_lines)
 
     @staticmethod
-    def write_node_file(node_ids, file_path):
-        # Open the file for writing
-        with open(file_path, 'w') as file:
-            # Write the total number of items at the top
-            file.write(f"{len(node_ids)}\n")
+    def write_node_file(nodes, file_path, coords=False):
+        """
+        Writes a tRIBS node-list file (*.nol) used by the NODEOUTPUTLIST,
+        HYDRONODELIST, and OUTLETNODELIST options.
 
-            # Write each item on a separate line
-            for number in node_ids:
-                file.write(f"{number}\n")
+        As of tRIBS v6.0.0 these files are CSV with a single header line that is
+        either ``ID`` or ``X,Y``, followed by one row per node (an ID, or an X,Y
+        coordinate pair).
+
+        :param nodes: Sequence of node IDs (when ``coords=False``), or a sequence of
+            ``(x, y)`` coordinate pairs (when ``coords=True``).
+        :param file_path: Output file path.
+        :param coords: If True, write an ``X,Y`` coordinate file; otherwise write an
+            ``ID`` file. Defaults to False.
+        """
+        with open(file_path, 'w') as file:
+            if coords:
+                file.write("X,Y\n")
+                for x, y in nodes:
+                    file.write(f"{x},{y}\n")
+            else:
+                file.write("ID\n")
+                for node_id in nodes:
+                    file.write(f"{node_id}\n")
 
     @staticmethod
     def write_geotiff(raster_dict, output_file_path, dtype='float32', compress=None):

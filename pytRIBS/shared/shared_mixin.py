@@ -148,43 +148,41 @@ class Shared:
     @staticmethod
     def read_node_list(file_path):
         """
-        Returns node list provide by .dat file.
+        Returns the node list from a tRIBS node-list file (*.nol).
 
-        The node list can be further modified or used for reading in element/pixel files and subsequent processing.
+        As of tRIBS v6.0.0 these files are CSV with a single header line that is
+        either ``ID`` or ``X,Y``, followed by one row per node. When the header is
+        ``ID`` a list of ID strings is returned; when it is ``X,Y`` a list of
+        ``(x, y)`` string tuples is returned.
 
-        :param file_path: Relative or absolute file path to .dat file.
+        The node list can be further modified or used for reading in element/pixel
+        files and subsequent processing.
+
+        :param file_path: Relative or absolute file path to the *.nol file.
         :type file_path: str
-        :return: List of nodes specified by .dat file
+        :return: List of node IDs, or list of (x, y) coordinate tuples.
         :rtype: list
 
         """
         try:
             with open(file_path, 'r') as file:
-                lines = file.readlines()
-
-            # Initialize an empty list to store the IDs
-            node_ids = []
-
-            # Check if the file is empty or has invalid content
-            if not lines:
-                return node_ids
-
-            # Parse the first column as the size of the array
-            size = int(lines[0].strip())
-
-            # Extract IDs from the remaining lines
-            for line in lines[1:]:
-                id_value = line.strip()
-                node_ids.append(id_value)
-
-            # Ensure the array has the specified size
-            if len(node_ids) != size:
-                print("Warning: Array size does not match the specified size in the file.")
-
-            return node_ids
+                lines = [line.strip() for line in file if line.strip()]
         except FileNotFoundError:
             print(f"Error: File '{file_path}' not found.")
             return []
+
+        # Empty or header-only file
+        if len(lines) < 2:
+            return []
+
+        header = lines[0].lower().replace(' ', '')
+        data = lines[1:]
+
+        if header == 'x,y':
+            return [tuple(row.split(',')) for row in data]
+
+        # Default to an ID column (also tolerates a bare 'id' header)
+        return [row.split(',')[0] for row in data]
 
     def read_reach_file(self, filename=None):
         """
@@ -225,80 +223,19 @@ class Shared:
 
         return gdf
 
-    def merge_parallel_voi(self, join=None, result_path=None, format=None, save=False):
-        """
-        Returns geodataframe of merged vornoi polygons from parallel tRIBS model run.
-
-        :param join: Data frame of dynamic or integrated tRIBS model output (optional).
-        :param save: Set to True to save geodataframe (optional, default True).
-        :param result_path: Path to save geodateframe (optional, default OUTFILENAME).
-        :param format: Driver options for writing geodateframe (optional, default = ESRI Shapefile)
-
-        :return: GeoDataFrame
-
-        """
-
-        outfilename = self.options["outfilename"]["value"]
-        path_components = outfilename.split(os.path.sep)
-        # Exclude the last directory as its actually base name
-        outfilename = os.path.sep.join(path_components[:-1])
-
-        parallel_voi_files = [f for f in os.listdir(outfilename) if 'voi.' in f]  # list of _voi.d+ files
-
-        if len(parallel_voi_files) == 0:
-            print(f"Cannot find voi files at: {outfilename}. Returning None")
-            return None
-
-        voi_list = []
-        processor_list = []
-        # gdf = gpd.GeoDataFrame(columns=['ID', 'geometry'])
-
-        for file in parallel_voi_files:
-            voi = self.read_voi_file(f"{outfilename}/{file}")
-            if voi is not None:
-                voi_list.append(voi[0])
-                processor = int(file.split("voi.")[-1])  # Extract processor number from file name
-                processor_list.extend(np.ones(len(voi[0])) * int(processor))
-            else:
-                print(f'Voi file {file} is empty.')
-
-        combined_gdf = gpd.pd.concat(voi_list, ignore_index=True)
-        combined_gdf['processor'] = processor_list  # Add 'processor' column
-        combined_gdf = combined_gdf.sort_values(by='ID')
-
-        if join is not None:
-            combined_gdf = combined_gdf.merge(join, on="ID", how="inner")
-
-            # Check for non-matching IDs
-            non_matching_ids = join[~join["ID"].isin(combined_gdf["ID"])]
-
-            if not non_matching_ids.empty:
-                print("Warning: Some IDs from the dynamic or integrated data frame do not match with the voronoi IDs.")
-
-        if save:
-            if result_path is None:
-                result_path = os.path.join(outfilename, "_mergedVoi")
-
-            if format is None:
-                format = "ESRI Shapefile"
-
-            combined_gdf.to_file(result_path, driver=format)
-
-        return combined_gdf
-
-    def get_spatial_files(self, suffix="_00d", dtime=0, write=True, header=True, colnames=None, single=True):
+    def get_spatial_files(self, suffix="_00d", dtime=0, header=True, colnames=None, single=True):
         """
         Reads and returns spatial output files (Dynamic or Integrated) for tRIBS models.
-        
-        The method determines whether to look for Serial or Parallel output files based 
-        strictly on the 'parallelmode' setting in the tRIBS input file.
+
+        As of tRIBS v6.0.0, parallel runs write the same consolidated output files as
+        serial runs, so a single file per time step is read regardless of the
+        'parallelmode' setting.
 
         :param str suffix: Either _00d for dynamics outputs or _00i for time-integrated ouputs.
-        :param int dtime : Option to specify time step at which to start merge of files.
-        :param bool write: Option to write combined dataframe to file (only applies if parallel).
+        :param int dtime : Option to specify time step at which to start reading files.
         :param bool header: Set to False if headers are not provided with spatial files.
         :param list colnames: If header = False, column names can be provided here.
-        :param bool single: If single = True then only spatial files specified at dtime are read.
+        :param bool single: If single = True then only the spatial file specified at dtime is read.
         :return: Dictionary of pandas dataframes keyed by time string.
         """
 
@@ -306,16 +243,9 @@ class Shared:
         runtime = int(self.options["runtime"]["value"])
         spopintrvl = int(self.options["spopintrvl"]["value"])
         outfilename = self.options["outfilename"]["value"]
-        
-        # Check the source of truth: The Input File options
-        try:
-            parallel_mode = int(self.options["parallelmode"]["value"])
-        except (KeyError, ValueError):
-            print("Warning: 'parallelmode' not found in options. Defaulting to Serial (0).")
-            parallel_mode = 0
 
         dyn_data = {}
-        
+
         # Calculate time steps to retrieve
         times = [dtime + i * spopintrvl for i in range((runtime - dtime) // spopintrvl + 1)]
         if times[-1] != runtime:
@@ -323,72 +253,27 @@ class Shared:
 
         for _time in times:
             otime = str(_time).zfill(4)
-            
-            # SERIAL MODE (parallelmode = 0)
-            if parallel_mode == 0:
-                target_file = f"{outfilename}.{otime}{suffix}"
-                
-                if os.path.exists(target_file):
-                    try:
-                        if header:
-                            df = pd.read_csv(target_file, header=0)
-                        else:
-                            df = pd.read_csv(target_file, header=None, names=colnames)
-                        
-                        # Sort by ID for consistency
-                        if header and 'ID' in df.columns:
-                            df = df.sort_values(by='ID')
-                        
-                        dyn_data[otime] = df
-                        
-                    except pd.errors.EmptyDataError:
-                        print(f'The file is empty: {target_file}')
-                else:
-                    print(f"Serial output file not found: {target_file}")
-                    if single: break
+            target_file = f"{outfilename}.{otime}{suffix}"
 
-            # PARALLEL MODE (parallelmode = 1)
+            if os.path.exists(target_file):
+                try:
+                    if header:
+                        df = pd.read_csv(target_file, header=0)
+                    else:
+                        df = pd.read_csv(target_file, header=None, names=colnames)
+
+                    # Sort by ID for consistency
+                    if header and 'ID' in df.columns:
+                        df = df.sort_values(by='ID')
+
+                    dyn_data[otime] = df
+
+                except pd.errors.EmptyDataError:
+                    print(f'The file is empty: {target_file}')
             else:
-                # Logic to merge processor files .0, .1, .2 etc.
-                processes = 0
-                dynfile = f"{outfilename}.{otime}{suffix}.{processes}"
-                df = None
-                
-                if os.path.exists(dynfile):
-                    # Loop until we run out of processor files
-                    while os.path.exists(dynfile):
-                        try:
-                            if header:
-                                current_df = pd.read_csv(dynfile, header=0)
-                            else:
-                                current_df = pd.read_csv(dynfile, header=None, names=colnames)
-                            
-                            if df is None:
-                                df = current_df
-                            else:
-                                df = pd.concat([df, current_df])
-                        
-                        except pd.errors.EmptyDataError:
-                            print(f'File empty during merge: {dynfile}')
-
-                        processes += 1
-                        dynfile = f"{outfilename}.{otime}{suffix}.{processes}"
-
-                    if df is not None:
-                        if header and 'ID' in df.columns:
-                            df = df.sort_values(by='ID')
-
-                        # If requested, write the merged result to a standard file
-                        if write:
-                            output_path = f"{outfilename}.{otime}{suffix}"
-                            df.to_csv(output_path, index=False)
-                            # TODO: This is where we would delete the .0, .1 files if cleaning up
-
-                        dyn_data[otime] = df
-                
-                else:
-                    print(f"Parallel output file (processor 0) not found: {dynfile}")
-                    if single: break
+                print(f"Spatial output file not found: {target_file}")
+                if single:
+                    break
 
             if single:
                 break
@@ -564,16 +449,16 @@ class Shared:
 
     def get_invariant_properties(self):
         """
-        Reads and processes invariant spatial properties based on the parallel mode setting.
+        Reads and processes invariant spatial properties from tRIBS output.
 
-        This method handles the integration of spatial variables and Voronoi files depending on the mode specified
-        in the options. It merges parallel files or reads single files, computes weights, and loads Voronoi data.
+        As of tRIBS v6.0.0, parallel runs write the same consolidated output files as
+        serial runs, so the integrated spatial file (*_00i) and the Voronoi (_voi) file
+        are each read as a single consolidated file regardless of `parallelmode`.
 
         The method does the following:
-        - Checks the `parallelmode` setting to determine if parallel processing is enabled.
-        - Merges parallel spatial files if in parallel mode, or reads a single spatial file if not.
-        - Computes weights based on the `VAr` column if in non-parallel mode.
-        - Loads Voronoi files based on the `parallelmode` setting.
+        - Reads the integrated spatial variables (*_00i) at runtime.
+        - Computes area-weighted `weight` values from the `VAr` column.
+        - Loads the Voronoi polygons.
 
         Parameters
         ----------
@@ -583,15 +468,6 @@ class Shared:
         -------
         None
 
-        Notes
-        -----
-        - If `parallelmode` is set to 1, the method merges files with a `_00i` suffix and integrates spatial variables
-          based on runtime values.
-        - If `parallelmode` is set to 0, it reads a single file based on the `outfilename` and `runtime` values,
-          and computes weights using the `VAr` column.
-        - Voronoi files are read or merged based on the parallel mode setting.
-        - If the `parallelmode` is not recognized, it prints an error message and sets the spatial variables and Voronoi data to `None`.
-
         Example
         -------
         >>> obj.get_invariant_properties()
@@ -599,11 +475,10 @@ class Shared:
         Raises
         ------
         ValueError
-            If there are issues merging files or reading Voronoi data.
+            If there are issues reading the spatial or Voronoi data.
         """
 
         # Read Integrated Spatial Variables (*_00i)
-        # We rely on get_spatial_files to check self.options['parallelmode']
         runtime_val = int(self.options['runtime']['value'])
         
         # Read the file (returns a dict)
@@ -623,15 +498,12 @@ class Shared:
             print('Unable To Read Integrated Spatial File (*_00i).')
             self.int_spatial_vars = None
 
-        # read in voronoi files only once
-        parallel_flag = int(self.options["parallelmode"]['value'])
-        if parallel_flag == 1:
-            self.voronoi = self.merge_parallel_voi()
-
-        elif parallel_flag == 0:
-            self.voronoi, _ = self.read_voi_file()
+        # read in voronoi file once
+        voi = self.read_voi_file()
+        if voi is not None:
+            self.voronoi, _ = voi
         else:
-            print('Unable To Load Voi File(s).')
+            print('Unable To Load Voi File.')
             self.voronoi = None
 
     @staticmethod
@@ -666,8 +538,8 @@ class Shared:
 
         Example
         -------
-        >>> dynamic_data_dict = results.merge_parallel_spatial_files(suffix="_00d", dtime=final_runtime, single=True)
-        >>> gdf_final_state = results.voronoi.merge(dynamic_data_dict, on='ID')
+        >>> dynamic_data_dict = results.get_spatial_files(suffix="_00d", dtime=final_runtime, single=True)
+        >>> gdf_final_state = results.voronoi.merge(dynamic_data_dict[str(final_runtime).zfill(4)], on='ID')
         >>> final_gw_raster_dict = results.grid_geodataframe( gdf=gdf_final_state, value_column='Nwt', cell_size=30.0)
 
         Raises

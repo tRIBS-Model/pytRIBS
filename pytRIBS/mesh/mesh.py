@@ -1,15 +1,20 @@
 import os
 import shutil
+import collections
 
 import pandas as pd
+import triangle as tr
 from rasterio.windows import from_bounds
 from scipy import ndimage
 from scipy.interpolate import RegularGridInterpolator
 from scipy.spatial import cKDTree
 from scipy.spatial import distance
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import dijkstra
 
 from shapely.vectorized import contains
-from shapely.ops import nearest_points
+from shapely.ops import nearest_points, snap, linemerge
+from shapely.geometry import LineString
 
 from math import ceil
 from rasterio.mask import mask
@@ -26,6 +31,190 @@ from pytRIBS.shared.inout import InOut
 
 from pytRIBS.shared.shared_mixin import Meta, Shared
 from pytRIBS.mesh.run_docker import MeshBuilderDocker
+
+
+# Geometry helpers for PSLG-constrained mesh generation
+#
+# Pure functions used by MeshFromPSLG to normalise coordinates, clean and
+# resample stream breaklines, and assemble a planar straight-line graph (PSLG)
+# of de-duplicated stream nodes and segments prior to triangulation.
+
+def _normalize_coords(xy, target_span=1e4):
+    """Shift to a local origin and scale so the largest span is ~target_span.
+
+    Triangle is sensitive to coordinate magnitude; normalising improves the
+    numerical robustness of the triangulation. Returns the normalised
+    coordinates along with the origin and scale needed to invert the transform.
+    """
+    xy = np.asarray(xy, float)
+    origin = xy.min(axis=0)
+    shifted = xy - origin
+    span = shifted.max(axis=0)
+    scale = max(span.max() / target_span, 1.0)
+    return shifted / scale, origin, scale
+
+
+def _denormalize_coords(xy_norm, origin, scale):
+    """Invert :func:`_normalize_coords`, mapping back to real-world coordinates."""
+    return np.asarray(xy_norm) * scale + origin
+
+
+def _cumlens(coords):
+    """Return cumulative arc length and per-segment lengths along a polyline."""
+    d = np.diff(coords, axis=0)
+    seg = np.sqrt((d * d).sum(axis=1))
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    return s, seg
+
+
+def _remove_spikes(coords, angle_tol_deg):
+    """Drop interior vertices that are nearly collinear or fully reversed.
+
+    Vertices whose incoming/outgoing segments are almost parallel
+    (cos ~ +1) or anti-parallel (cos ~ -1) add no shape information and can
+    create degenerate triangulation constraints, so they are removed.
+    """
+    if len(coords) <= 2:
+        return coords
+    keep = [coords[0]]
+    for i in range(1, len(coords) - 1):
+        a, b, c = coords[i - 1], coords[i], coords[i + 1]
+        u, v = b - a, c - b
+        nu, nv = np.linalg.norm(u), np.linalg.norm(v)
+        if nu == 0 or nv == 0:
+            continue
+        cosang = float(np.dot(u, v) / (nu * nv))
+        if not (cosang > 0.9999 or cosang < -0.9999):
+            keep.append(b)
+    keep.append(coords[-1])
+    return np.asarray(keep)
+
+
+def _node_streams(lines, tau_snap=1.0):
+    """Snap near-coincident vertices and node all intersections once."""
+    ml = linemerge(unary_union(snap(unary_union(lines), unary_union(lines), tau_snap)))
+    if isinstance(ml, LineString):
+        return [ml]
+    return list(ml.geoms)
+
+
+def _resample_with_min_spacing(line, spacing, m_min, angle_tol_deg=2.0, keep_original_vertices=False):
+    """Resample a line to a target spacing while enforcing a minimum spacing.
+
+    Spikes are optionally removed first, then samples are placed along the line
+    at ``spacing`` intervals (plus the endpoints, and optionally the original
+    vertices). Consecutive samples closer than ``m_min`` are dropped, and the
+    final endpoint is always preserved.
+    """
+    coords = np.asarray(line.coords, float)
+    if coords.ndim == 2 and coords.shape[1] > 2:
+        coords = coords[:, :2]
+    coords = _remove_spikes(coords, angle_tol_deg) if angle_tol_deg > 0 else coords
+    s, seg = _cumlens(coords)
+    L = float(s[-1])
+    if L == 0:
+        return coords[:1]
+
+    s_grid = np.arange(0.0, L + 1e-9, spacing)
+    s_orig = s if keep_original_vertices else np.array([0.0, L])
+    all_s = np.unique(np.round(np.concatenate([s_orig, s_grid]), 9))
+
+    kept = []
+    seg_idx = 0
+    for t in all_s:
+        while seg_idx < len(seg) - 1 and s[seg_idx + 1] < t - 1e-12:
+            seg_idx += 1
+        k = np.where(np.isclose(s, t, rtol=0, atol=1e-9))[0]
+        if k.size:
+            pt = coords[k[0]]
+        else:
+            t0, t1 = s[seg_idx], s[seg_idx + 1]
+            if t1 <= t0:
+                continue
+            a = (t - t0) / (t1 - t0)
+            pt = coords[seg_idx] * (1 - a) + coords[seg_idx + 1] * a
+        if not kept or np.linalg.norm(pt - kept[-1]) >= m_min - 1e-12:
+            kept.append(pt)
+
+    if np.linalg.norm(kept[-1] - coords[-1]) > 1e-9:
+        kept.append(coords[-1])
+    out = [kept[0]]
+    for p in kept[1:]:
+        if np.linalg.norm(p - out[-1]) >= m_min - 1e-12:
+            out.append(p)
+    if np.linalg.norm(out[-1] - coords[-1]) > 1e-9:
+        out.append(coords[-1])
+    return np.asarray(out)
+
+
+def _build_stream_pslg(resampled_edges, m_min, dedupe_radius):
+    """Assemble resampled stream edges into a de-duplicated PSLG.
+
+    Vertices within ``dedupe_radius`` of one another are merged via a union-find
+    so that intersecting/branching streams share nodes. Returns the unique node
+    coordinates and the list of (i, j) segment index pairs, with degenerate
+    (near-zero-length) segments discarded.
+    """
+    clean_edges = []
+    for arr in (resampled_edges or []):
+        if arr is None:
+            continue
+        a = np.asarray(arr, float)
+        if a.ndim != 2 or a.shape[0] < 2:
+            continue
+        if a.shape[1] > 2:
+            a = a[:, :2]
+        clean_edges.append(a)
+
+    if not clean_edges:
+        return np.empty((0, 2), dtype=float), []
+
+    P = np.vstack(clean_edges)
+    kdt = cKDTree(P)
+    pairs = kdt.query_pairs(r=max(float(dedupe_radius), 1e-9))
+
+    parent = np.arange(len(P))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for i, j in pairs:
+        union(i, j)
+
+    rep_to_new = {}
+    new_index = np.empty(len(P), dtype=int)
+    uniq = []
+    for i in range(len(P)):
+        r = find(i)
+        if r not in rep_to_new:
+            rep_to_new[r] = len(uniq)
+            uniq.append(P[r])
+        new_index[i] = rep_to_new[r]
+    uniq = np.asarray(uniq, float)
+
+    segs = set()
+    cursor = 0
+    for arr in clean_edges:
+        n = len(arr)
+        idxs = new_index[cursor:cursor + n]
+        cursor += n
+        prev = idxs[0]
+        for cur in idxs[1:]:
+            if cur != prev:
+                segs.add((min(prev, cur), max(prev, cur)))
+            prev = cur
+
+    tiny = max(0.5, 0.25 * float(dedupe_radius))
+    segments = [(i, j) for i, j in segs if np.linalg.norm(uniq[i] - uniq[j]) >= tiny - 1e-12]
+    return uniq, segments
 
 
 class Preprocess:
@@ -168,7 +357,7 @@ class Preprocess:
         if output_path is None:
             output_path = f'{self.output_dir}/{name}_filled.tif'
 
-        wbt.fill_depressions(self.dem_preprocessing, os.path.abspath(output_path), fix_flats=True)
+        wbt.fill_depressions_wang_and_liu(self.dem_preprocessing, os.path.abspath(output_path), fix_flats=True)
 
         return output_path
 
@@ -591,7 +780,7 @@ class Preprocess:
         outlet = self.create_outlet(self.outlet[0], self.outlet[1], flow_acc, self.snap_distance,
                                     output_path=f'{outlet_path}')
         ws_mask = self.generate_watershed_mask(d8_raster, outlet)
-        _, ws_bound = self.generate_watershed_boundary(ws_mask, output_path=f'{boundary_path}')
+        ws_gdf, ws_bound = self.generate_watershed_boundary(ws_mask, output_path=f'{boundary_path}')
         stream_shp = self.convert_stream_raster_to_vector(streams, d8_raster)
         self.clip_rasters([filled], ws_bound, output_dir=output_dir, method='both')
         self.clip_streamline(os.path.abspath(stream_shp), ws_bound, output_path=f'{output_streams_path}')
@@ -599,6 +788,8 @@ class Preprocess:
         if clean is True:
             shutil.rmtree(temp)
             self.output_dir = output_dir
+
+        return ws_gdf
 
 
 class GenerateMesh:
@@ -708,6 +899,24 @@ class GenerateMesh:
             self.bounds = src.bounds
             self.width = src.width
             self.height = src.height
+            nodata = src.nodata
+
+        # Build a nodata-free copy for the wavelet/feature analysis. Nodata cells (often
+        # a large sentinel such as -999999) otherwise create an enormous terrain->nodata
+        # "cliff" that dominates the significance normalization, hiding all real interior
+        # relief and forcing every significant point onto the data edge (the watershed
+        # boundary). self.data is left raw for display/elevation reference.
+        self.data_filled = self.data.astype(float)
+        invalid = ~np.isfinite(self.data_filled)
+        if nodata is not None:
+            invalid |= (self.data_filled == nodata)
+        if invalid.all():
+            raise ValueError(f"DEM '{self.raster}' contains no valid data.")
+        if invalid.any():
+            # Replace each nodata cell with its nearest valid value (no artificial cliff)
+            idx = ndimage.distance_transform_edt(invalid, return_distances=False,
+                                                 return_indices=True)
+            self.data_filled = self.data_filled[tuple(idx)]
 
         cols = np.arange(self.width)
         rows = np.arange(self.height)
@@ -723,7 +932,7 @@ class GenerateMesh:
         if self.transform[4] > 0:
             self.y_grid = np.flipud(self.y_grid)
 
-        self.wavelet_packet = pywt.WaveletPacket2D(data=self.data, wavelet='db1',
+        self.wavelet_packet = pywt.WaveletPacket2D(data=self.data_filled, wavelet='db1',
                                                    maxlevel=self.maxlevel)
         # update maxlevel incase it's none
         self.maxlevel = self.wavelet_packet.maxlevel
@@ -1051,8 +1260,9 @@ class GenerateMesh:
             row_end = min(row_end, self.height)
             col_end = min(col_end, self.width)
 
-            # Extract DEM data and coordinate grids within the cell
-            dem_cell = self.data[row_start:row_end, col_start:col_end]
+            # Extract DEM data and coordinate grids within the cell (nodata-filled, so
+            # the feature location is not pulled to a terrain->nodata edge)
+            dem_cell = self.data_filled[row_start:row_end, col_start:col_end]
             x_cell = self.x_grid[row_start:row_end, col_start:col_end]
             y_cell = self.y_grid[row_start:row_end, col_start:col_end]
 
@@ -1197,7 +1407,7 @@ class GenerateMesh:
         x = np.arange(width) * self.transform[0] + self.transform[2]
         y = np.arange(height) * self.transform[4] + self.transform[5]
 
-        interpolator = RegularGridInterpolator((y, x), self.data, method='linear', bounds_error=False,
+        interpolator = RegularGridInterpolator((y, x), self.data_filled, method='linear', bounds_error=False,
                                                fill_value=None)
 
         elevations = interpolator((points[:, 1], points[:, 0]))
@@ -1368,6 +1578,12 @@ class GenerateMesh:
         """
         Partitions a mesh and produces a .reach file for parallel execution with tRIBS.
 
+        This MeshBuilder/METIS workflow is optional as of tRIBS v6.0.0, which partitions the reach
+        graph in-process with METIS when the ``GRAPHFILE`` path does not yet exist. It is kept here
+        for users who want to pre-generate a partition externally: point ``GRAPHFILE`` at the
+        resulting .reach file and tRIBS reads it, validating it against the mesh and the ``-np``
+        processor count.
+
         This function handles the partitioning of a mesh by interacting with Docker to build and process
         the mesh based on the provided input files and partitioning parameters. It performs the following steps:
 
@@ -1409,3 +1625,1190 @@ class GenerateMesh:
         meshbuild.clean_directory()
 
         os.chdir(current)
+
+
+class MeshFromPSLG:
+    """
+    Generate a complete tRIBS TIN by triangulating a planar straight-line graph (PSLG).
+
+    This is the primary mesh-generation strategy in pytRIBS. Rather than handing a
+    cloud of points to tRIBS/meshbuilder and letting it triangulate, this class
+    builds an explicit PSLG — a buffered watershed boundary ring, the stream
+    network as breaklines, and an outlet reach connecting them — and triangulates
+    it directly with Shewchuk's Triangle (the :mod:`triangle` package). Quality and
+    area constraints add interior Steiner points as needed, but the ``YY`` switch
+    forbids Steiner points on any PSLG segment so every boundary and stream node is
+    a preserved constraint vertex.
+
+    After triangulation it samples elevations from the DEM, enforces monotonic
+    descent along the stream network (so tRIBS ``FlowDirs`` does not mark stream
+    nodes as sinks), and assigns tRIBS boundary codes. The result can be written
+    directly as the four tRIBS mesh files (``.nodes``/``.edges``/``.tri``/``.z``)
+    via :meth:`write`, bypassing the meshbuilder.
+
+    Interior terrain points are supplied by the caller (typically the code-0 points
+    selected by :class:`GenerateMesh`), keeping point selection and triangulation
+    decoupled and avoiding a ``.points`` file round-trip.
+
+    Parameters
+    ----------
+    interior_points : numpy.ndarray or pandas.DataFrame
+        Interior (code-0) terrain points. An ndarray of shape (N, 2+) whose first
+        two columns are x, y, or a DataFrame with 'x' and 'y' columns. Any extra
+        columns are ignored.
+    watershed : geopandas.GeoDataFrame or shapely geometry
+        Watershed polygon used to derive the buffered no-flow boundary.
+    stream_network : geopandas.GeoDataFrame
+        Stream network line features used as breaklines.
+    dem_file : str
+        Path to the DEM raster used for elevation sampling and resolution guidance.
+    outlet : geopandas.GeoDataFrame, geopandas.GeoSeries, shapely Point, optional
+        Spatial hint for locating the stream outlet among the network's degree-1
+        endpoints. If None, the endpoint nearest the watershed boundary is used.
+    boundary_buffer_dist : float, optional
+        Distance (m) the watershed polygon is buffered outward to place the no-flow
+        boundary. Default 30.0. Must be >= 30 m.
+    boundary_spacing : float, optional
+        Target spacing (m) between nodes on the buffered boundary ring. Default 50.0.
+    stream_point_spacing : float, optional
+        Target spacing (m) between stream nodes. Default 25.0.
+    stream_clearance_radius : float, optional
+        Interior points within this distance (m) of a stream are removed. Default 15.0.
+    mesh_quality_opts : str, optional
+        Triangle quality switches inserted between the hardcoded ``p`` prefix and
+        ``DjYY`` suffix (e.g. ``'q10a15050'``). Do NOT include ``YY`` here — it is
+        hardcoded. Default ``'q10'``. See
+        https://www.cs.cmu.edu/~quake/triangle.switch.html.
+    separate_parallel_streams : bool, optional
+        After triangulating, find TIN edges that directly bridge distinct stream
+        branches which only join far downstream, insert interior separator nodes to
+        break them, and re-triangulate (repeated up to ``MAX_SEPARATOR_PASSES``). This
+        stops tRIBS (``WeightedShortestPath``) from merging parallel branches
+        prematurely. Default True.
+
+    Attributes
+    ----------
+    vertices : numpy.ndarray
+        (nnodes, 3) array of mesh node x, y, z coordinates, populated by :meth:`generate`.
+    triangles : numpy.ndarray
+        (ntri, 3) array of triangle node indices, populated by :meth:`generate`.
+    node_codes : numpy.ndarray
+        Per-node boundary code (0=interior, 1=boundary, 2=outlet, 3=stream),
+        populated by :meth:`generate`.
+
+    Examples
+    --------
+    >>> pslg = MeshFromPSLG(interior_xy, watershed_gdf, stream_gdf, 'dem.tif',
+    ...                     outlet=outlet_gdf, boundary_buffer_dist=30.0,
+    ...                     boundary_spacing=50.0, stream_point_spacing=40.0,
+    ...                     mesh_quality_opts='q10a15050')
+    >>> pslg.generate()
+    >>> pslg.write('SMF_mesh', 'data/model/mesh/')
+    """
+
+    MIN_BUFFER_DIST = 30.0          # m: smallest sensible boundary buffer
+    MIN_STREAM_SPACING = 5.0        # m: floor on resampled stream node spacing
+    INTERIOR_REMOVE_RADIUS = 5.0    # m: thin interior points closer than this
+    MIN_STREAM_GRADIENT = 0.001     # minimum enforced stream slope (1 mm/m)
+    STEINER_TOL = 0.1               # m: tolerance for snapping Steiner codes to PSLG
+    PARALLEL_GRAPH_FACTOR = 3.0     # a TIN-adjacent stream-node pair whose along-network
+                                    #   distance exceeds this many node spacings is a
+                                    #   premature merge, not a confluence edge
+    SEPARATOR_MAX_EDGE_FACTOR = 2.0 # only separate cross-edges shorter than this many
+                                    #   node spacings (a narrow corridor a missing node
+                                    #   would fill); longer edges across open ground are
+                                    #   an interior-density problem, not a merge to break
+    MAX_SEPARATOR_PASSES = 6        # cap on triangulate->separate->re-triangulate passes
+
+    def __init__(self, interior_points, watershed, stream_network, dem_file,
+                 outlet=None, boundary_buffer_dist=30.0, boundary_spacing=50.0,
+                 stream_point_spacing=25.0, stream_clearance_radius=2.0,
+                 mesh_quality_opts='q10',
+                 separate_parallel_streams=True):
+
+        self.interior_points = self._coerce_interior_points(interior_points)
+        self.watershed_geom = self._coerce_geometry(watershed)
+        self.stream_network = stream_network
+        self.dem_file = dem_file
+        self.outlet_hint_xy = self._coerce_outlet(outlet)
+
+        self.boundary_buffer_dist = boundary_buffer_dist
+        self.boundary_spacing = boundary_spacing
+        self.stream_point_spacing = stream_point_spacing
+        self.stream_clearance_radius = stream_clearance_radius
+        self.mesh_quality_opts = mesh_quality_opts
+        self.separate_parallel_streams = separate_parallel_streams
+
+        # Outputs populated by generate()
+        self.vertices = None
+        self.triangles = None
+        self.node_codes = None
+
+    # Input coercion helpers
+    @staticmethod
+    def _coerce_interior_points(interior_points):
+        """Return interior points as a DataFrame with x, y, code(=0) columns."""
+        if isinstance(interior_points, pd.DataFrame):
+            df = interior_points[['x', 'y']].copy()
+        else:
+            arr = np.asarray(interior_points, float)
+            if arr.ndim != 2 or arr.shape[1] < 2:
+                raise ValueError("interior_points must be (N, 2+) array-like or a DataFrame with x, y.")
+            df = pd.DataFrame(arr[:, :2], columns=['x', 'y'])
+        df['code'] = 0
+        return df.reset_index(drop=True)
+
+    @staticmethod
+    def _coerce_geometry(watershed):
+        """Return a single shapely geometry for the watershed."""
+        if isinstance(watershed, gpd.GeoDataFrame):
+            return watershed.geometry.unary_union
+        if isinstance(watershed, gpd.GeoSeries):
+            return watershed.unary_union
+        return watershed  # assume already a shapely geometry
+
+    @staticmethod
+    def _coerce_outlet(outlet):
+        """Return the outlet hint as an (x, y) array, or None."""
+        if outlet is None:
+            return None
+        if isinstance(outlet, gpd.GeoDataFrame):
+            geom = outlet.geometry.iloc[0]
+        elif isinstance(outlet, gpd.GeoSeries):
+            geom = outlet.iloc[0]
+        else:
+            geom = outlet  # assume shapely Point
+        return np.array([geom.x, geom.y], dtype=float)
+
+    # Orchestration
+    def generate(self):
+        """
+        Run the full PSLG meshing workflow.
+
+        Builds the boundary and stream PSLG, prepares interior points, triangulates,
+        samples and conditions elevations, and assigns node codes. Populates and
+        returns the mesh.
+
+        Returns
+        -------
+        tuple of (numpy.ndarray, numpy.ndarray, numpy.ndarray)
+            ``(vertices, triangles, node_codes)`` — also stored on the instance.
+        """
+        self._validate_parameters()
+
+        with rasterio.open(self.dem_file) as src:
+            self._dem_res = max(src.res[0], src.res[1])
+
+        bnd_pts, bnd_codes = self._build_boundary()
+        stream_nodes_xy, stream_segments_local, unified_stream_geom, \
+            stream_outlet_xy, outlet_bnd_local_idx = self._build_stream_network(bnd_pts, bnd_codes)
+        # Clear interior points against the *resampled* stream segments (the straight
+        # chords the triangulation actually constrains), unioned with the original
+        # curved lines. An interior point in a chord-vs-bend gap is far from the curved
+        # line yet can sit on a resampled chord, forming a near-zero-area sliver whose
+        # circumcenter -- a Voronoi vertex in tRIBS -- flies far outside the domain and
+        # breaks soil/land-use resampling.
+        if stream_segments_local:
+            resampled_stream_geom = unary_union(
+                [LineString([stream_nodes_xy[i], stream_nodes_xy[j]])
+                 for i, j in stream_segments_local])
+            clearance_geom = unary_union([unified_stream_geom, resampled_stream_geom])
+        else:
+            clearance_geom = unified_stream_geom
+        all_interior = self._prepare_interior_points(clearance_geom)
+
+        # Inner boundary ring: evenly-spaced code-0 nodes along the divide so the
+        # outermost simulated Voronoi cells form a smooth band, independent of the
+        # wavelet interior-point density. Stream-cleared like other interior points,
+        # and thinned where wavelet points already sit nearby.
+        inner_ring = self._build_inner_boundary()
+        if len(inner_ring) and self.stream_clearance_radius > 0:
+            ring_gs = gpd.GeoSeries.from_xy(inner_ring[:, 0], inner_ring[:, 1])
+            inner_ring = inner_ring[
+                (ring_gs.distance(clearance_geom) >= self.stream_clearance_radius).values]
+        if len(inner_ring) and len(all_interior):
+            d, _ = cKDTree(all_interior[['x', 'y']].values).query(inner_ring)
+            inner_ring = inner_ring[d > self.INTERIOR_REMOVE_RADIUS]
+        if len(inner_ring):
+            ring_df = pd.DataFrame({'x': inner_ring[:, 0], 'y': inner_ring[:, 1], 'code': 0})
+            all_interior = pd.concat([all_interior, ring_df], ignore_index=True)
+
+        # Constant parts of the PSLG (independent of separator insertion)
+        n_bnd = len(bnd_pts)
+        boundary_segs = [(i, (i + 1) % n_bnd) for i in range(n_bnd)]
+        bnd_df = pd.DataFrame({'x': bnd_pts[:, 0], 'y': bnd_pts[:, 1], 'code': bnd_codes})
+        # Outlet reach connects this preserved stream endpoint to the boundary outlet node
+        _, stream_outlet_local_idx = cKDTree(stream_nodes_xy).query(stream_outlet_xy)
+        stream_outlet_local_idx = int(stream_outlet_local_idx)
+
+        # Steps 4-6: assemble points (boundary, interior, then stream), build the PSLG
+        # segments, and triangulate. With separate_parallel_streams on, repeat: after
+        # each triangulation find any TIN edge that directly bridges two
+        # topologically-distant stream nodes (a premature merge), drop an interior
+        # separator node on its midpoint, and re-triangulate. The midpoint lies on the
+        # offending edge so the constrained Delaunay cannot re-form it.
+        print("\nStep 4-6: Combining points, defining constraints, and triangulating...")
+        sep_pass = 0
+        while True:
+            final_non_stream_pts = pd.concat([bnd_df, all_interior], ignore_index=True)
+            n_non_stream = len(final_non_stream_pts)  # boundary rows stay at 0..n_bnd-1
+            stream_nodes_df = pd.DataFrame(stream_nodes_xy, columns=['x', 'y'])
+            stream_nodes_df['code'] = 3
+            final_input_df = pd.concat([final_non_stream_pts, stream_nodes_df], ignore_index=True)
+            all_xy = final_input_df[['x', 'y']].values
+
+            stream_segs = [(i + n_non_stream, j + n_non_stream) for i, j in stream_segments_local]
+            outlet_reach_seg = (outlet_bnd_local_idx, stream_outlet_local_idx + n_non_stream)
+            all_segs = set(tuple(sorted(s)) for s in boundary_segs + stream_segs + [outlet_reach_seg])
+            segments = [list(s) for s in all_segs]
+
+            mesh_vertices_xy, triangles = self._triangulate(all_xy, segments)
+
+            if not self.separate_parallel_streams:
+                break
+            new_seps = self._detect_stream_merge_separators(
+                mesh_vertices_xy, triangles, stream_nodes_xy, stream_segments_local,
+                all_interior[['x', 'y']].values if len(all_interior) else np.empty((0, 2)))
+            if not len(new_seps):
+                if sep_pass:
+                    print(f"  Premature stream merges resolved after {sep_pass} pass(es).")
+                break
+            sep_pass += 1
+            if sep_pass > self.MAX_SEPARATOR_PASSES:
+                print(f"  WARNING: {len(new_seps)} premature stream merge(s) remain after "
+                      f"{self.MAX_SEPARATOR_PASSES} passes; leaving them. A finer "
+                      f"stream_point_spacing may help if they matter.")
+                break
+            print(f"  Pass {sep_pass}: inserting {len(new_seps)} separator node(s) and "
+                  f"re-triangulating.")
+            sep_df = pd.DataFrame({'x': new_seps[:, 0], 'y': new_seps[:, 1], 'code': 0})
+            all_interior = pd.concat([all_interior, sep_df], ignore_index=True)
+
+        # Step 7: elevations for all (incl. Steiner) vertices
+        print("\nStep 7: Assigning elevations to mesh vertices...")
+        mesh_vertices_z = self._sample_elevations(mesh_vertices_xy)
+
+        # Step 7b: enforce monotonic descent along the stream network
+        mesh_vertices_z = self._enforce_monotonic_descent(
+            mesh_vertices_xy, mesh_vertices_z, stream_nodes_xy,
+            stream_segments_local, int(stream_outlet_local_idx)
+        )
+
+        vertices_3d = np.column_stack([mesh_vertices_xy, mesh_vertices_z])
+
+        # Step 8: node codes
+        node_codes = self._assign_node_codes(
+            mesh_vertices_xy, all_xy, final_input_df, n_bnd, stream_segs, outlet_reach_seg
+        )
+
+        self.vertices = vertices_3d
+        self.triangles = np.array(triangles)
+        self.node_codes = node_codes
+        return self.vertices, self.triangles, self.node_codes
+
+    # Step methods
+    def _validate_parameters(self):
+        """Validate buffer/spacing parameters and warn on under-sampled boundaries."""
+        if self.boundary_buffer_dist < self.MIN_BUFFER_DIST:
+            raise ValueError(
+                f"boundary_buffer_dist={self.boundary_buffer_dist}m is below the minimum allowed "
+                f"value of {self.MIN_BUFFER_DIST}m. A buffer this small places the no-flow boundary "
+                f"too close to the watershed edge and is unlikely to produce a valid tRIBS mesh."
+            )
+
+        if self.boundary_spacing > 2 * self.boundary_buffer_dist:
+            optimal_spacing = 2 * self.boundary_buffer_dist
+            optimal_buffer = self.boundary_spacing / 2
+            print(
+                f"\nWARNING: boundary_spacing ({self.boundary_spacing}m) is more than 2× "
+                f"boundary_buffer_dist ({self.boundary_buffer_dist}m). Concave corners of the "
+                f"watershed boundary may be under-sampled, causing boundary segments to cut "
+                f"back into the watershed.\n"
+                f"  To fix, choose ONE of:\n"
+                f"    - Reduce boundary_spacing to <= {optimal_spacing:.0f}m "
+                f"(optimal for your current buffer)\n"
+                f"    - Increase boundary_buffer_dist to >= {optimal_buffer:.0f}m "
+                f"(optimal for your current spacing)"
+                f"\n  If the recommendations above are not followed then a detailed check of the output shapefiles is required to verify that boundary nodes (Code 1) are surrounding the entire TIN, no interior nodes (Code 0) are on the boundary.\n"
+            )
+
+    def _build_boundary(self):
+        """Step 1: buffered boundary ring nodes (code 1) from the watershed polygon."""
+        print("\nStep 1: Generating buffered boundary from watershed shapefile...")
+        buffered_geom = self.watershed_geom.buffer(self.boundary_buffer_dist)
+        ext = buffered_geom.exterior  # already-ordered polygon ring
+
+        total_bnd_len = ext.length
+        n_bnd = max(3, int(round(total_bnd_len / self.boundary_spacing)))
+        bnd_pts = np.array([
+            [ext.interpolate(i / n_bnd, normalized=True).x,
+             ext.interpolate(i / n_bnd, normalized=True).y]
+            for i in range(n_bnd)
+        ])
+        bnd_codes = np.ones(n_bnd, dtype=int)
+        print(f"  {n_bnd} boundary nodes at ~{self.boundary_spacing}m spacing "
+              f"(buffer={self.boundary_buffer_dist}m)")
+        return bnd_pts, bnd_codes
+
+    def _build_inner_boundary(self):
+        """Inner ring of interior (code-0) nodes following the watershed divide at
+        boundary_spacing.
+
+        The simulated domain edge is the outer edge of the code-0/3 Voronoi cells, 
+        so without evenly-spaced nodes along the divide the outermost cells are large 
+        and ragged. This lays down a uniform ring just inside the boundary so those 
+        cells form a smooth band. Mirrors the buffered outer ring at the same spacing.
+        """
+        ext = self.watershed_geom.exterior
+        n = max(3, int(round(ext.length / self.boundary_spacing)))
+        pts = np.array([
+            [ext.interpolate(i / n, normalized=True).x,
+             ext.interpolate(i / n, normalized=True).y]
+            for i in range(n)
+        ])
+        print(f"  {n} inner boundary nodes at ~{self.boundary_spacing}m spacing")
+        return pts
+
+    def _build_stream_network(self, bnd_pts, bnd_codes):
+        """Step 2: node the stream network, locate the outlet, resample, build the PSLG.
+
+        Mutates ``bnd_codes`` in place to mark the boundary outlet node (code 2).
+
+        Returns
+        -------
+        tuple
+            ``(stream_nodes_xy, stream_segments_local, unified_stream_geom,
+            stream_outlet_xy, outlet_bnd_local_idx)``.
+        """
+        print("\nStep 2: Building stream network...")
+        raw_lines = []
+        for g in self.stream_network.geometry.dropna():
+            if isinstance(g, LineString):
+                raw_lines.append(g)
+            elif g.geom_type == "MultiLineString":
+                raw_lines.extend(list(g.geoms))
+
+        lines = _node_streams(raw_lines, tau_snap=1.0)
+
+        # Collect all degree-1 endpoints (potential outlet or tributary inlets)
+        endpoint_count = collections.Counter()
+        for ln in lines:
+            c = list(ln.coords)
+            endpoint_count[tuple(c[0][:2])] += 1
+            endpoint_count[tuple(c[-1][:2])] += 1
+        degree1_pts = [np.array(pt) for pt, cnt in endpoint_count.items() if cnt == 1]
+        if not degree1_pts:
+            raise RuntimeError("Stream network has no degree-1 endpoints; cannot locate outlet.")
+
+        # Mean nearest-neighbour distance of interior points for spacing guidance
+        interior_xy = self.interior_points[['x', 'y']].values
+        if len(interior_xy) > 1:
+            nn_dists, _ = cKDTree(interior_xy).query(interior_xy, k=2)
+            mean_nn = float(nn_dists[:, 1].mean())
+        else:
+            mean_nn = None
+
+        # Locate the stream outlet: nearest degree-1 endpoint to the outlet hint,
+        # falling back to the endpoint nearest the watershed boundary.
+        if self.outlet_hint_xy is not None:
+            dists = [np.linalg.norm(pt - self.outlet_hint_xy) for pt in degree1_pts]
+        else:
+            ws_boundary = self.watershed_geom.boundary
+            dists = [ws_boundary.distance(Point(pt)) for pt in degree1_pts]
+
+        stream_outlet_xy = degree1_pts[int(np.argmin(dists))]
+        print(f"  Stream outlet: ({stream_outlet_xy[0]:.2f}, {stream_outlet_xy[1]:.2f})")
+
+        # Nearest buffered boundary node becomes the outlet (code 2)
+        bnd_kdt = cKDTree(bnd_pts)
+        _, outlet_bnd_local_idx = bnd_kdt.query(stream_outlet_xy)
+        outlet_bnd_local_idx = int(outlet_bnd_local_idx)
+        bnd_codes[outlet_bnd_local_idx] = 2
+        outlet_bnd_xy = bnd_pts[outlet_bnd_local_idx]
+        print(f"  Outlet boundary node: idx={outlet_bnd_local_idx} "
+              f"({outlet_bnd_xy[0]:.2f}, {outlet_bnd_xy[1]:.2f})")
+
+        # Resample stream edges
+        dedupe_radius = max(1.5, 0.05 * float(self.stream_point_spacing))
+        resampled_edges = []
+        for ln in lines:
+            pts = _resample_with_min_spacing(
+                ln, spacing=self.stream_point_spacing, m_min=self.MIN_STREAM_SPACING,
+                angle_tol_deg=2.0, keep_original_vertices=False
+            )
+            if len(pts) >= 2:
+                resampled_edges.append(pts)
+
+        unified_stream_geom = linemerge(unary_union(lines))
+        total_len_km = sum(ln.length for ln in lines) / 1000.0
+
+        stream_nodes_xy, stream_segments_local = _build_stream_pslg(
+            resampled_edges, m_min=self.MIN_STREAM_SPACING, dedupe_radius=dedupe_radius
+        )
+        print(f"  {len(stream_nodes_xy)} stream nodes from {total_len_km:.2f} km "
+              f"at ~{self.stream_point_spacing}m spacing")
+
+        # Longest stream flow path via two-sweep BFS on the assembled PSLG graph
+        if stream_segments_local:
+            sadj = collections.defaultdict(list)
+            for i, j in stream_segments_local:
+                d = float(np.linalg.norm(stream_nodes_xy[i] - stream_nodes_xy[j]))
+                sadj[i].append((j, d))
+                sadj[j].append((i, d))
+
+            def bfs_far(adj, src):
+                dist = {src: 0.0}
+                q = collections.deque([src])
+                far, dmax = src, 0.0
+                while q:
+                    v = q.popleft()
+                    for u, d in adj[v]:
+                        if u not in dist:
+                            dist[u] = dist[v] + d
+                            if dist[u] > dmax:
+                                dmax, far = dist[u], u
+                            q.append(u)
+                return far, dmax
+
+            u, _ = bfs_far(sadj, next(iter(sadj)))
+            _, longest_m = bfs_far(sadj, u)
+            longest_km = longest_m / 1000.0
+        else:
+            longest_km = 0.0
+
+        print(f"\n  Stream spacing guidance (your setting: {self.stream_point_spacing}m):")
+        print(f"    DEM resolution       : {self._dem_res:.1f}m  ← minimum meaningful spacing")
+        if mean_nn is not None:
+            print(f"    Mean interior spacing: {mean_nn:.1f}m  ← suggested maximum")
+            print(f"    Suggested range      : {self._dem_res:.1f}m – {mean_nn:.1f}m")
+        print(f"    Longest flow path    : {longest_km:.2f}km (from assembled breakline)")
+        if self.stream_point_spacing < self._dem_res:
+            print(
+                f"  WARNING: stream_point_spacing ({self.stream_point_spacing}m) is finer than the "
+                f"DEM resolution ({self._dem_res:.1f}m). This adds detail that does not exist in the "
+                f"source data. Consider increasing to at least {self._dem_res:.1f}m."
+            )
+        if mean_nn is not None and self.stream_point_spacing > mean_nn:
+            print(
+                f"  WARNING: stream_point_spacing ({self.stream_point_spacing}m) is coarser than "
+                f"the mean interior point spacing ({mean_nn:.1f}m). The stream network will "
+                f"be represented at a lower resolution than the surrounding terrain. "
+                f"Consider decreasing to at most {mean_nn:.1f}m."
+            )
+
+        return (stream_nodes_xy, stream_segments_local, unified_stream_geom,
+                stream_outlet_xy, outlet_bnd_local_idx)
+
+    def _prepare_interior_points(self, unified_stream_geom):
+        """Step 3: thin interior points, optionally cull near trees, apply stream clearance."""
+        print("\nStep 3: Preparing interior points...")
+        interior_pts = self.interior_points[['x', 'y', 'code']].copy().reset_index(drop=True)
+
+        # Remove interior points too close to each other
+        if len(interior_pts) > 1:
+            int_kdt = cKDTree(interior_pts[['x', 'y']].values)
+            close_pairs = int_kdt.query_pairs(r=self.INTERIOR_REMOVE_RADIUS)
+            drop_set = {j for _, j in close_pairs}
+            if drop_set:
+                print(f"  Removing {len(drop_set)} interior points within "
+                      f"{self.INTERIOR_REMOVE_RADIUS}m of another.")
+                interior_pts = interior_pts.drop(index=list(drop_set)).reset_index(drop=True)
+
+        # Extension hook: subclasses may add or remove interior nodes here before the
+        # stream clearance step (see _augment_interior_points).
+        all_interior = self._augment_interior_points(interior_pts)
+        if all_interior is None or all_interior.empty:
+            all_interior = pd.DataFrame(columns=['x', 'y', 'code'])
+
+        # Stream clearance zone on interior points only
+        if self.stream_clearance_radius > 0 and not all_interior.empty:
+            print(f"  Applying {self.stream_clearance_radius}m stream clearance zone...")
+            interior_gs = gpd.GeoSeries.from_xy(all_interior['x'], all_interior['y'])
+            dist_to_stream = interior_gs.distance(unified_stream_geom)
+            too_close = dist_to_stream < self.stream_clearance_radius
+            n_removed = int(too_close.sum())
+            if n_removed:
+                print(f"  Removing {n_removed} interior points inside clearance zone.")
+                all_interior = all_interior[~too_close.values].reset_index(drop=True)
+
+        return all_interior
+
+    def _augment_interior_points(self, interior_pts):
+        """Hook for subclasses to add or remove interior nodes.
+
+        Called by :meth:`_prepare_interior_points` after de-duplication and before
+        the stream-clearance step. Receives a DataFrame of interior points with
+        ``x``, ``y`` and ``code`` columns and must return a DataFrame with the same
+        columns. The base implementation is a no-op, returning the points unchanged.
+        Override to inject additional interior nodes from another data source.
+        """
+        return interior_pts
+
+    def _detect_stream_merge_separators(self, mesh_vertices_xy, triangles,
+                                        stream_nodes_xy, stream_segments_local,
+                                        existing_interior_xy):
+        """Find TIN edges that directly bridge topologically-distant stream nodes and
+        return midpoint separator coordinates to break them on re-triangulation.
+
+        tRIBS rebuilds the channel network in ``tFlowNet::WeightedShortestPath`` by
+        connecting stream nodes through *direct* stream-to-stream TIN edges, so two
+        separate branches merge prematurely exactly when such an edge spans them. This
+        inspects the actual triangulation (not a distance proxy): for every TIN edge
+        whose endpoints are both stream nodes, if the two are far apart along the
+        stream network, more than ``PARALLEL_GRAPH_FACTOR`` node spacings, or
+        unreachable (different components), then the edge is a premature merge. A
+        separator placed on its midpoint lies on the edge, so the constrained Delaunay
+        cannot re-form it; being code-0 it is invisible to ``WeightedShortestPath``,
+        forcing the branches to join only at their real confluence.
+
+        Returns an (M, 2) array of separator x, y coordinates (possibly empty).
+        """
+        S = np.asarray(stream_nodes_xy, float)
+        n_s = len(S)
+        if n_s < 2 or not stream_segments_local:
+            return np.empty((0, 2), float)
+
+        # Map each stream node to its mesh vertex (positions preserved by the YY switch)
+        _, stream_mesh_idx = cKDTree(mesh_vertices_xy).query(S)
+        mesh_to_stream = {int(m): i for i, m in enumerate(stream_mesh_idx)}
+
+        # Unique TIN edges whose endpoints are both stream nodes. Only short edges are
+        # considered: a separator fixes a narrow corridor that a missing interior node
+        # would otherwise occupy. Long stream-to-stream edges span open ground (too few
+        # interior nodes).
+        max_edge = self.SEPARATOR_MAX_EDGE_FACTOR * self.stream_point_spacing
+        seen, cand = set(), []
+        for t in triangles:
+            for k in range(3):
+                a = mesh_to_stream.get(int(t[k]))
+                b = mesh_to_stream.get(int(t[(k + 1) % 3]))
+                if a is None or b is None or a == b:
+                    continue
+                if np.linalg.norm(S[a] - S[b]) > max_edge:
+                    continue
+                key = (a, b) if a < b else (b, a)
+                if key not in seen:
+                    seen.add(key); cand.append(key)
+        if not cand:
+            return np.empty((0, 2), float)
+
+        # Along-network distances for the stream nodes involved
+        rows, cols, wts = [], [], []
+        for i, j in stream_segments_local:
+            d = float(np.linalg.norm(S[i] - S[j]))
+            rows += [i, j]; cols += [j, i]; wts += [d, d]
+        graph = csr_matrix((wts, (rows, cols)), shape=(n_s, n_s))
+        srcs = sorted({a for a, _ in cand})
+        src_row = {s: r for r, s in enumerate(srcs)}
+        gdist = dijkstra(graph, directed=False, indices=srcs)
+
+        graph_sep = self.PARALLEL_GRAPH_FACTOR * self.stream_point_spacing
+        seps = [0.5 * (S[i] + S[j]) for i, j in cand
+                if not np.isfinite(gdist[src_row[i], j]) or gdist[src_row[i], j] > graph_sep]
+        if not seps:
+            return np.empty((0, 2), float)
+
+        seps = np.asarray(seps, float)
+        tol = max(1.0, 0.25 * self.stream_point_spacing)
+        # De-duplicate near-coincident separators, and drop any already present as nodes
+        drop = {b for _, b in cKDTree(seps).query_pairs(r=tol)}
+        seps = seps[[k for k in range(len(seps)) if k not in drop]]
+        if len(seps) and len(existing_interior_xy):
+            d, _ = cKDTree(np.asarray(existing_interior_xy, float)).query(seps)
+            seps = seps[d > tol]
+        return seps
+
+    def _sample_elevations(self, points_xy):
+        """Sample DEM elevations for a list of (x, y) points, handling nodata.
+
+        The buffered no-flow boundary and the outlet sit outside the watershed, and
+        clipped DEMs commonly carry nodata there, so some samples come back as the
+        nodata value (e.g. -999999), NaN, or out-of-bounds. Each such sample is
+        filled with the elevation of the nearest point that sampled valid terrain, so
+        no node carries the raw nodata into the mesh.
+        """
+        print(f"  - Reading DEM: {self.dem_file}")
+        pts = np.asarray(points_xy, float)
+        with rasterio.open(self.dem_file) as src:
+            nodata = src.nodata
+            elev = np.array([val[0] for val in src.sample([tuple(p) for p in pts])], dtype=float)
+
+        bad = ~np.isfinite(elev)
+        if nodata is not None:
+            bad |= np.isclose(elev, nodata)
+        n_bad = int(bad.sum())
+        if n_bad:
+            if bad.all():
+                raise ValueError(
+                    f"All {len(elev)} sampled elevations are nodata; does '{self.dem_file}' "
+                    f"cover the mesh extent including the buffered boundary?")
+            good = ~bad
+            _, nn = cKDTree(pts[good]).query(pts[bad])
+            elev[bad] = elev[good][nn]
+            print(f"  - Filled {n_bad} nodata elevation(s) from the nearest valid sample.")
+        print(f"  - Sampled {len(elev)} points.")
+        return elev
+
+    def _triangulate(self, all_xy, segments):
+        """Step 6: triangulate the PSLG with Triangle (no Steiner points on segments)."""
+        print("\nStep 6: Triangulating...")
+        Vn, origin_xy, scale_xy = _normalize_coords(all_xy)
+        # YY: no Steiner points on any PSLG segment (boundary ring or stream segments).
+        # Interior Steiner points are still added as needed by the quality options.
+        # This ensures every stream-coded node is an original PSLG node with a
+        # monotonically-enforced elevation, not a DEM-raw Steiner interpolation.
+        mesh = tr.triangulate({'vertices': Vn, 'segments': segments},
+                              f"p{self.mesh_quality_opts}DjYY")
+        mesh_vertices_xy = _denormalize_coords(np.asarray(mesh['vertices']), origin_xy, scale_xy)
+        return mesh_vertices_xy, mesh['triangles']
+
+    def _enforce_monotonic_descent(self, mesh_vertices_xy, mesh_vertices_z, stream_nodes_xy,
+                                   stream_segments_local, stream_outlet_local_idx):
+        """Step 7b: nudge stream-node elevations so they strictly descend to the outlet.
+
+        FlowDirs() in tRIBS marks any node with steepest-slope <= 0 as a sink. At
+        coarse DEM resolution stream nodes can share a raster cell, producing flat
+        or inverted segments that trigger lakelist errors. Walk the assembled PSLG
+        upstream from the outlet and raise any node that is not strictly higher than
+        its downstream neighbour.
+        """
+        print("\nStep 7b: Enforcing monotonic descent along stream network...")
+        if not stream_segments_local:
+            print("  No stream segments — skipping.")
+            return mesh_vertices_z
+
+        tmp_kdt = cKDTree(mesh_vertices_xy)
+        _, stream_mesh_idx = tmp_kdt.query(stream_nodes_xy)
+        mono_z = mesh_vertices_z[stream_mesh_idx].copy()
+
+        mono_adj = collections.defaultdict(list)
+        for mi, mj in stream_segments_local:
+            mono_adj[mi].append(mj)
+            mono_adj[mj].append(mi)
+
+        # The outlet terminal often samples a bank elevation rather than the
+        # thalweg (especially at coarse DEM resolution). Starting BFS from it would
+        # incorrectly raise all upstream nodes. Since FillLakes always drains to
+        # kOpenBoundary regardless of elevation, the terminal's own elevation is
+        # irrelevant, skip it and root the BFS at its upstream neighbour instead.
+        outlet_upstream = mono_adj[stream_outlet_local_idx]
+        if outlet_upstream:
+            bfs_root = outlet_upstream[0]
+            mono_visited = {stream_outlet_local_idx, bfs_root}
+            mono_queue = collections.deque([bfs_root])
+        else:
+            mono_visited = {stream_outlet_local_idx}
+            mono_queue = collections.deque([stream_outlet_local_idx])
+        n_adjusted = 0
+
+        while mono_queue:
+            dn = mono_queue.popleft()          # downstream node
+            for up in mono_adj[dn]:
+                if up not in mono_visited:
+                    mono_visited.add(up)
+                    seg_len = float(np.linalg.norm(stream_nodes_xy[up] - stream_nodes_xy[dn]))
+                    min_z = mono_z[dn] + max(seg_len * self.MIN_STREAM_GRADIENT, 0.01)
+                    if mono_z[up] <= mono_z[dn]:
+                        mono_z[up] = min_z
+                        n_adjusted += 1
+                    mono_queue.append(up)
+
+        mesh_vertices_z[stream_mesh_idx] = mono_z
+        if n_adjusted:
+            print(f"  Adjusted {n_adjusted} of {len(stream_nodes_xy)} stream nodes "
+                  f"(min gradient enforced: {self.MIN_STREAM_GRADIENT * 1000:.1f} mm/m).")
+        else:
+            print("  Stream elevations already monotonically decreasing — no adjustments needed.")
+        return mesh_vertices_z
+
+    def _assign_node_codes(self, mesh_vertices_xy, all_xy, final_input_df,
+                           n_bnd, stream_segs, outlet_reach_seg):
+        """Step 8: assign tRIBS boundary codes to every mesh node (incl. Steiner)."""
+        print("\nStep 8: Assigning node codes...")
+        n_mesh_verts = len(mesh_vertices_xy)
+        final_node_codes = np.zeros(n_mesh_verts, dtype=int)
+
+        mesh_kdt = cKDTree(mesh_vertices_xy)
+        _, mesh_idx_for_orig = mesh_kdt.query(all_xy)
+
+        for orig_idx, mesh_idx in enumerate(mesh_idx_for_orig):
+            final_node_codes[mesh_idx] = final_input_df['code'].iloc[orig_idx]
+
+        is_original = np.zeros(n_mesh_verts, dtype=bool)
+        is_original[mesh_idx_for_orig] = True
+
+        # Vectorized Steiner vertex code assignment
+        new_vert_indices = np.where(~is_original)[0]
+        if new_vert_indices.size > 0:
+            new_vert_gs = gpd.GeoSeries.from_xy(
+                mesh_vertices_xy[new_vert_indices, 0],
+                mesh_vertices_xy[new_vert_indices, 1]
+            )
+            # Unified geometry of every stream PSLG segment + outlet reach
+            stream_pslg_geom = unary_union([
+                LineString([all_xy[i], all_xy[j]])
+                for i, j in stream_segs + [outlet_reach_seg]
+            ])
+            dist_to_stream = new_vert_gs.distance(stream_pslg_geom)
+            # Use the actual PSLG chord segments (not the smooth exterior ring) so
+            # that Steiner points placed on the straight chords are within tolerance.
+            bnd_pslg_geom = unary_union([
+                LineString([all_xy[i], all_xy[(i + 1) % n_bnd]])
+                for i in range(n_bnd)
+            ])
+            dist_to_bnd = new_vert_gs.distance(bnd_pslg_geom)
+
+            on_stream = dist_to_stream.values < self.STEINER_TOL
+            on_bnd = (~on_stream) & (dist_to_bnd.values < self.STEINER_TOL)
+            final_node_codes[new_vert_indices[on_stream]] = 3
+            final_node_codes[new_vert_indices[on_bnd]] = 1
+
+        print(f"  Final codes — 0(Interior):{(final_node_codes==0).sum()}  "
+              f"1(Boundary):{(final_node_codes==1).sum()}  "
+              f"2(Outlet):{(final_node_codes==2).sum()}  "
+              f"3(Stream):{(final_node_codes==3).sum()}")
+        return final_node_codes
+
+    # Output
+    def write(self, output_prefix, output_path):
+        """Write the four tRIBS mesh files. Call :meth:`generate` first."""
+        if self.vertices is None:
+            raise RuntimeError("Call generate() before write().")
+        InOut.write_mesh_files(output_prefix, output_path,
+                               self.vertices, self.triangles, self.node_codes)
+
+    def write_diagnostics(self, output_base, crs=None):
+        """Write diagnostic shapefiles for the generated mesh. Call :meth:`generate` first."""
+        if self.vertices is None:
+            raise RuntimeError("Call generate() before write_diagnostics().")
+        InOut.write_mesh_diagnostics(output_base, self.vertices, self.triangles,
+                                     self.node_codes, crs=crs)
+
+
+class MeshProcessor:
+    """
+    Mixin providing high-level mesh-generation workflows for the :class:`Mesh` class.
+
+    These methods orchestrate the lower-level :class:`GenerateMesh` and
+    :class:`MeshFromPSLG` classes and operate on a :class:`Mesh` instance — they
+    expect ``self.mesh_generator`` (a :class:`GenerateMesh`), ``self.meta``, and the
+    ``self.optmeshinput`` / ``self.inputdatafile`` option dictionaries to be set by
+    ``Mesh.__init__``. The class mirrors the :class:`~pytRIBS.model.model.ModelProcessor`
+    pattern, keeping orchestration logic in this module rather than in ``classes.py``.
+    """
+
+    def build_mesh(self, method='pslg', **kwargs):
+        """
+        Generate a tRIBS mesh using one of two strategies.
+
+        Parameters
+        ----------
+        method : {'pslg', 'points', 'station'}, optional
+            Mesh-generation strategy. Default ``'pslg'``.
+
+            - ``'pslg'`` (primary): build a planar straight-line graph (buffered
+              boundary + stream breaklines + outlet reach) and triangulate it
+              in-process with Triangle, writing the four tRIBS mesh files
+              (``.nodes``/``.edges``/``.tri``/``.z``) that tRIBS reads directly.
+              See :meth:`generate_pslg_mesh`.
+            - ``'points'`` (legacy): select significant terrain points and write a
+              ``.points`` file for tRIBS/meshbuilder to triangulate. See
+              :meth:`generate_points_mesh`.
+            - ``'station'``: build a minimal single-polygon mesh for a point/station
+              model — one central stream node ringed by closed boundary nodes with a
+              single downslope outlet. See :meth:`generate_station_mesh`.
+        **kwargs
+            Forwarded to the selected method.
+
+        Returns
+        -------
+        object
+            The :class:`MeshFromPSLG` instance (``'pslg'``) or the points
+            GeoDataFrame (``'points'`` / ``'station'``).
+        """
+        if method == 'pslg':
+            return self.generate_pslg_mesh(**kwargs)
+        if method == 'points':
+            return self.generate_points_mesh(**kwargs)
+        if method == 'station':
+            return self.generate_station_mesh(**kwargs)
+        raise ValueError(f"Unknown mesh method '{method}'. Use 'pslg', 'points', or 'station'.")
+
+    def generate_pslg_mesh(self, threshold=None, interior_points=None,
+                           output_prefix=None, output_path=None, write_files=True,
+                           diagnostics=False, crs=None, pslg_class=MeshFromPSLG,
+                           **pslg_kwargs):
+        """
+        Generate a complete TIN via PSLG triangulation and write the tRIBS mesh files.
+
+        Reuses the watershed, stream network, outlet and DEM already loaded by the
+        :class:`GenerateMesh` instance (``self.mesh_generator``), so no shapefiles
+        are re-read. Interior terrain points are either supplied directly or selected
+        from the DEM via the wavelet/curvature routine. On a successful write the
+        model is pointed at the new mesh (``OPTMESHINPUT`` = 1, ``INPUTDATAFILE`` =
+        base name), which propagates to :class:`~pytRIBS.classes.Model` via shared
+        options.
+
+        Parameters
+        ----------
+        threshold : float, optional
+            Significance threshold passed to
+            :meth:`GenerateMesh.extract_points_from_significant_details` to select
+            interior (code-0) points. Required unless ``interior_points`` is given.
+        interior_points : numpy.ndarray or pandas.DataFrame, optional
+            Pre-computed interior points (x, y). If given, ``threshold`` is ignored.
+        output_prefix : str, optional
+            Base name for the mesh files. Defaults to ``'{Name}_mesh'``.
+        output_path : str, optional
+            Output directory for the mesh files. Defaults to the Mesh instance's
+            ``mesh_dir`` (e.g. ``proj.directories['mesh']``), or the current working
+            directory if neither is set. Created if it does not exist.
+        write_files : bool, optional
+            Write the four tRIBS mesh files. Default True.
+        diagnostics : bool, optional
+            Also write diagnostic shapefiles. Default False. These are written to the
+            preprocessing folder (alongside the other GIS data), not the mesh directory.
+        crs : optional
+            CRS for diagnostic shapefiles. Defaults to the project EPSG from metadata.
+        pslg_class : type, optional
+            The PSLG mesh class to instantiate. Defaults to :class:`MeshFromPSLG`.
+            Extension packages may pass a subclass to customise mesh generation
+            (any extra keyword arguments are forwarded to it via ``pslg_kwargs``).
+        **pslg_kwargs
+            Additional parameters forwarded to ``pslg_class`` (e.g.
+            ``boundary_buffer_dist``, ``boundary_spacing``, ``stream_point_spacing``,
+            ``mesh_quality_opts``).
+
+        Returns
+        -------
+        :class:`MeshFromPSLG`
+            The generated mesh object (also stored as ``self.pslg_mesh``).
+        """
+        if getattr(self, 'mesh_generator', None) is None:
+            raise RuntimeError(
+                "generate_pslg_mesh requires a GenerateMesh instance; initialize Mesh "
+                "with generate_mesh_args so watershed/stream/outlet/DEM are loaded."
+            )
+        gm = self.mesh_generator
+
+        if interior_points is None:
+            if threshold is None:
+                raise ValueError("Provide either 'threshold' (to select interior points) "
+                                 "or an explicit 'interior_points' array.")
+            points, _ = gm.extract_points_from_significant_details(threshold)
+            interior_points = points[points[:, 3] == 0][:, :2]  # code-0 interior only
+
+        pslg = pslg_class(
+            interior_points=interior_points,
+            watershed=gm.watershed,
+            stream_network=gm.stream_network,
+            dem_file=gm.raster,
+            outlet=gm.outlet,
+            **pslg_kwargs,
+        )
+        pslg.generate()
+
+        if output_prefix is None:
+            output_prefix = f"{self.meta.get('Name') or 'mesh'}_mesh"
+
+        # Resolve the output directory: explicit arg > Mesh.mesh_dir > cwd.
+        out_dir = output_path if output_path is not None else (getattr(self, 'mesh_dir', None) or '')
+        out_dir = os.path.join(out_dir, '')  # ensure a trailing separator
+        base = f"{out_dir}{output_prefix}"
+
+        if write_files:
+            if out_dir.strip(os.sep):
+                os.makedirs(out_dir, exist_ok=True)
+            pslg.write(output_prefix, out_dir)
+            # Point the model at the complete 4-file mesh: OPTMESHINPUT 1 (tMesh data)
+            # read from the INPUTDATAFILE base name. Picked up by Model via shared options.
+            self.optmeshinput['value'] = 1
+            self.inputdatafile['value'] = base
+
+        if diagnostics:
+            if crs is None and self.meta.get('EPSG') is not None:
+                crs = f"EPSG:{self.meta['EPSG']}"
+            # Write diagnostics into the preprocessing folder (with the other GIS data);
+            # fall back to the mesh dir if the mesh was built without running Preprocess.
+            diag_dir = getattr(getattr(self, 'preprocess', None), 'output_dir', None) or out_dir
+            pslg.write_diagnostics(os.path.join(diag_dir, output_prefix), crs=crs)
+
+        self.pslg_mesh = pslg
+        return pslg
+
+    def generate_points_mesh(self, threshold, output_file=None):
+        """
+        Points path: select significant terrain points and write a ``.points`` file.
+
+        tRIBS triangulates the points itself (``OPTMESHINPUT`` = 2, Point
+        Triangulator). This is a convenience wrapper around the historical workflow
+        (:meth:`GenerateMesh.extract_points_from_significant_details` →
+        :meth:`GenerateMesh.convert_points_to_gdf` →
+        :meth:`GenerateMesh.write_point_file`); those methods remain available for
+        direct use. On success it points the model at the file
+        (``POINTFILENAME`` + ``OPTMESHINPUT`` = 2, propagated to
+        :class:`~pytRIBS.classes.Model` via shared options) and stores the buffered
+        watershed as ``self.buffered_watershed`` for downstream workflows.
+
+        Parameters
+        ----------
+        threshold : float
+            Significance threshold passed to
+            :meth:`GenerateMesh.extract_points_from_significant_details`. Lower values
+            keep more points (denser mesh); general range 0–1.
+        output_file : str, optional
+            Path for the ``.points`` file. Defaults to ``'{Name}.points'`` inside the
+            Mesh instance's ``mesh_dir`` (e.g. ``proj.directories['mesh']``), or the
+            current working directory if ``mesh_dir`` is not set.
+
+        Returns
+        -------
+        geopandas.GeoDataFrame
+            The selected nodes written to the points file. The buffered watershed is
+            also available as ``self.buffered_watershed``.
+        """
+        if getattr(self, 'mesh_generator', None) is None:
+            raise RuntimeError(
+                "generate_points_mesh requires a GenerateMesh instance; initialize Mesh "
+                "with generate_mesh_args."
+            )
+        gm = self.mesh_generator
+        points, buffered_watershed = gm.extract_points_from_significant_details(threshold)
+        gdf = gm.convert_points_to_gdf(points)
+
+        if output_file is None:
+            out_dir = getattr(self, 'mesh_dir', None) or ''
+            output_file = os.path.join(out_dir, f"{self.meta.get('Name') or 'mesh'}.points")
+        parent = os.path.dirname(output_file)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        gm.write_point_file(gdf, output_file)
+
+        # Point the model at the points file: OPTMESHINPUT 2 (Point Triangulator).
+        # Picked up by Model via shared options.
+        self.pointfilename['value'] = output_file
+        self.optmeshinput['value'] = 2
+        # Expose the buffered watershed (used by downstream met/forcing workflows).
+        self.buffered_watershed = buffered_watershed
+        return gdf
+
+    # Minimum drainage slope for a station mesh; a flat (zero-gradient) flow edge
+    # stalls kinematic routing, so the realised slope is floored at this value.
+    MIN_STATION_SLOPE_DEG = 0.5
+
+    # Default station Voronoi cell area (m^2) when the user specifies neither radius
+    # nor area: ~100 m^2, i.e. a standard 10 m grid cell
+    DEFAULT_STATION_AREA = 100.0
+
+    # Default footprint (m) over which slope/aspect are derived from the DEM. Decoupled
+    # from the (cosmetic) cell size so a small cell does not yield a noisy, too-local
+    # gradient. ~50 m is good enough for a representative hillslope scale.
+    DEFAULT_TERRAIN_RADIUS = 50.0
+
+    def generate_station_mesh(self, station_xy, station_elev=None, slope=None, aspect=None,
+                              radius=None, area=None, terrain_radius=None, dem_file=None,
+                              n_boundary=8, min_slope=MIN_STATION_SLOPE_DEG, output_file=None):
+        """
+        Build a minimal single-polygon (point/station) mesh and write a ``.points`` file.
+
+        Produces one central stream node (``bc`` = 3) ringed by ``n_boundary`` evenly
+        spaced closed boundary nodes (``bc`` = 1), with a single open outlet
+        (``bc`` = 2) placed in the downslope (aspect) direction. tRIBS triangulates
+        the points itself (``OPTMESHINPUT`` = 2).
+
+        For a single interior node only two elevations affect the physics: the centre
+        Z (the station elevation, which also drives the met lapse-rate correction) and
+        the outlet Z, whose difference over the centre→outlet distance sets the one
+        flow-edge slope feeding the radiation/ET surface slope and the kinematic
+        hydraulic gradient. Voronoi cell area comes from the ring geometry and aspect
+        from the outlet azimuth — so no terrain surface is needed. The closed ring
+        nodes are inert and are placed at the centre elevation.
+
+        Slope and aspect are taken from ``dem_file`` when provided (the typical case —
+        derived from a least-squares plane fit over ``terrain_radius``, a hillslope-scale
+        footprint decoupled from the cell size so the gradient reflects the hillslope
+        rather than the DEM pixel); otherwise pass them directly.
+
+        Parameters
+        ----------
+        station_xy : tuple of float
+            (x, y) coordinate of the station / central node.
+        station_elev : float, optional
+            Centre-node elevation. Sampled from ``dem_file`` if not given; required if
+            no DEM is provided.
+        slope : float, optional
+            Drainage slope in **degrees**. Derived from ``dem_file`` if not given;
+            otherwise defaults to ``min_slope`` (with a warning). Floored at
+            ``min_slope`` so routing does not stall.
+        aspect : float, optional
+            Outlet azimuth in **degrees** clockwise from north. Derived from
+            ``dem_file`` if not given; otherwise defaults to 180° (with a warning).
+        radius : float, optional
+            Ring radius (m), i.e. the centre→outlet distance. If neither ``radius`` nor
+            ``area`` is given, defaults to a ~100 m² cell (see ``area``).
+        area : float, optional
+            Target Voronoi cell area (m²) for the centre node, converted to the ring
+            radius that yields it. Takes precedence over ``radius``. When neither is
+            specified, defaults to 100 m² (≈ a 10 m grid cell, matching the standard
+            single-station template).
+        terrain_radius : float, optional
+            Footprint (m) over which slope/aspect are derived from ``dem_file``,
+            decoupled from the cell size. Defaults to ``max(50 m, ring radius)`` so the
+            gradient is read at a hillslope scale even for a small cell. Has no effect
+            when slope/aspect are supplied directly.
+        dem_file : str, optional
+            DEM used to derive any unspecified ``station_elev`` / ``slope`` / ``aspect``.
+        n_boundary : int, optional
+            Number of ring nodes. Default 8. (Cosmetic for a single-cell model; only
+            even angular spacing matters.)
+        min_slope : float, optional
+            Minimum drainage slope in degrees. Default 0.5.
+        output_file : str, optional
+            Path for the ``.points`` file. Defaults to ``'{Name}.points'`` inside the
+            Mesh instance's ``mesh_dir``, or the current working directory.
+
+        Returns
+        -------
+        geopandas.GeoDataFrame
+            The station nodes written to the points file.
+        """
+        cx, cy = float(station_xy[0]), float(station_xy[1])
+
+        # Cell size: the centre node's Voronoi cell is a regular n-gon with apothem
+        # R/2, so area = n*(R/2)^2*tan(pi/n). Default to a representative ~100 m^2 cell
+        # so users need not pick a size; an explicit ``area`` (preferred) or ``radius``
+        # overrides it. Resolve to a radius first so DEM slope/aspect can be derived at
+        # the cell scale.
+        if radius is None and area is None:
+            area = self.DEFAULT_STATION_AREA
+        if area is not None:
+            radius = 2.0 * np.sqrt(area / (n_boundary * np.tan(np.pi / n_boundary)))
+
+        # Slope/aspect footprint is decoupled from the (cosmetic) cell size: default to
+        # a hillslope scale, but never smaller than the cell itself.
+        if terrain_radius is None:
+            terrain_radius = max(self.DEFAULT_TERRAIN_RADIUS, radius)
+
+        # DEM is the primary source for the physical inputs: derive any unspecified
+        # elevation / slope / aspect from the DEM over the terrain footprint, so
+        # fine-resolution micro-topography doesn't dominate the gradient.
+        if dem_file is not None:
+            dem_elev, dem_slope, dem_aspect = self._dem_terrain(dem_file, cx, cy, terrain_radius)
+            if station_elev is None:
+                station_elev = dem_elev
+            if slope is None:
+                slope = dem_slope
+            if aspect is None:
+                aspect = dem_aspect
+
+        if station_elev is None:
+            raise ValueError("station_elev is required when no dem_file is provided.")
+        if aspect is None:
+            aspect = 180.0
+            print("  WARNING: no aspect provided or derived; defaulting outlet to due south (180°).")
+        if slope is None:
+            slope = min_slope
+            print(f"  WARNING: no slope provided or derived; defaulting to {min_slope}° "
+                  f"so kinematic routing does not stall.")
+
+        # Guardrail: a flat flow edge stalls routing — floor the slope.
+        if slope < min_slope:
+            print(f"  WARNING: slope {slope:.3f}° below minimum {min_slope}°; raising to {min_slope}°.")
+            slope = min_slope
+
+        # Ring: outlet placed exactly at the aspect azimuth, the rest evenly spaced.
+        # Azimuth is clockwise from north: 0° -> +y (north), 90° -> +x (east).
+        az = aspect + np.arange(n_boundary) * (360.0 / n_boundary)
+        az_rad = np.radians(az)
+        ring_x = cx + radius * np.sin(az_rad)
+        ring_y = cy + radius * np.cos(az_rad)
+
+        # Realised slope uses the actual placed radius (centre->outlet distance).
+        outlet_z = station_elev - np.tan(np.radians(slope)) * radius
+
+        # Centre stream node, then ring nodes (index 1 = the aspect-aligned outlet).
+        xs = [cx] + list(ring_x)
+        ys = [cy] + list(ring_y)
+        zs = [station_elev] + [station_elev] * n_boundary
+        bcs = [3] + [1] * n_boundary
+        zs[1] = outlet_z
+        bcs[1] = 2
+
+        crs = f"EPSG:{self.meta['EPSG']}" if self.meta.get('EPSG') else None
+        gdf = gpd.GeoDataFrame(
+            {'elevation': zs, 'bc': bcs},
+            geometry=[Point(x, y) for x, y in zip(xs, ys)],
+            crs=crs,
+        )
+
+        if output_file is None:
+            out_dir = getattr(self, 'mesh_dir', None) or ''
+            output_file = os.path.join(out_dir, f"{self.meta.get('Name') or 'station'}.points")
+        parent = os.path.dirname(output_file)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        InOut.write_point_file(gdf, output_file)
+
+        # Point the model at the points file: OPTMESHINPUT 2 (Point Triangulator).
+        self.pointfilename['value'] = output_file
+        self.optmeshinput['value'] = 2
+
+        print(f"  Station mesh: centre stream node + {n_boundary} ring nodes; outlet at "
+              f"{aspect:.0f}° azimuth, slope {slope:.2f}°, radius {radius:.1f} m "
+              f"(Δz {station_elev - outlet_z:.2f} m) -> {output_file}")
+        return gdf
+
+    @staticmethod
+    def _dem_terrain(dem_file, x, y, radius):
+        """Sample station elevation and derive slope/aspect over the cell footprint.
+
+        The station elevation is the DEM value at ``(x, y)``. Slope (deg) and downslope
+        aspect (deg azimuth clockwise from north) come from a least-squares plane fit
+        to every DEM cell within ``radius`` of ``(x, y)`` — i.e. at the scale of the
+        station's representative cell, not the DEM pixel. This prevents fine-resolution
+        micro-topography from dominating the gradient. Falls back to a flat result
+        (slope 0°, aspect 0°) if fewer than three valid cells fall within the radius
+        (e.g. a tiny radius relative to the DEM, or the station on the raster edge).
+        """
+        with rasterio.open(dem_file) as src:
+            elev = float(next(src.sample([(x, y)]))[0])
+            row, col = src.index(x, y)
+            t = src.transform
+            res_x = abs(t.a)
+            res_y = abs(t.e)
+            npix_x = max(1, int(np.ceil(radius / res_x)))
+            npix_y = max(1, int(np.ceil(radius / res_y)))
+            r0, r1 = max(row - npix_y, 0), min(row + npix_y + 1, src.height)
+            c0, c1 = max(col - npix_x, 0), min(col + npix_x + 1, src.width)
+            win = src.read(1, window=((r0, r1), (c0, c1))).astype(float)
+            nodata = src.nodata
+            # Cell-centre real-world coordinates for the window (north-up assumed).
+            xs = t.c + (np.arange(c0, c1) + 0.5) * t.a
+            ys = t.f + (np.arange(r0, r1) + 0.5) * t.e
+            xg, yg = np.meshgrid(xs, ys)
+
+        mask = (xg - x) ** 2 + (yg - y) ** 2 <= radius ** 2
+        mask &= np.isfinite(win)
+        if nodata is not None:
+            mask &= win != nodata
+
+        n_cells = int(mask.sum())
+        if n_cells < 3:
+            print(f"  WARNING: terrain footprint (radius {radius:.0f} m) covers only "
+                  f"{n_cells} DEM cell(s); cannot fit a slope/aspect plane — treating as "
+                  f"flat. Increase terrain_radius.")
+            return elev, 0.0, 0.0
+        if n_cells < 9:
+            print(f"  WARNING: terrain footprint (radius {radius:.0f} m) spans only "
+                  f"{n_cells} DEM cells; derived slope/aspect may be noisy. Consider a "
+                  f"larger terrain_radius.")
+
+        # Fit z = a*(X-x) + b*(Y-y) + c; a = dz/d_east, b = dz/d_north (per-metre).
+        # Coordinates are centred on the station for numerical conditioning.
+        A = np.column_stack([xg[mask] - x, yg[mask] - y, np.ones(int(mask.sum()))])
+        coef, *_ = np.linalg.lstsq(A, win[mask], rcond=None)
+        a, b = float(coef[0]), float(coef[1])
+        slope_deg = float(np.degrees(np.arctan(np.hypot(a, b))))
+        # Downslope direction = -(a, b) in (east, north); azimuth from north clockwise.
+        aspect_deg = float(np.degrees(np.arctan2(-a, -b)) % 360.0)
+        return elev, slope_deg, aspect_deg
