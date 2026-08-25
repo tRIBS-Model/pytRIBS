@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 pytRIBS uses [semantic versioning](https://semver.org/).
 
-## [1.0.0] - Unreleased
+## [1.0.0] - 2026-08-25
 pytRIBS v1.0.0 is the first stable release of the package, moving out of beta and aligning pytRIBS with the tRIBS v6.0.0 model release. Because it targets the reworked v6.0.0 input structure, this release is not backwards compatible with files produced for earlier tRIBS versions. This version standardizes how pytRIBS reads and writes the soil, land use, and gridded parameter files to the new v6.0.0 format, adds support for the new snow parameter file (`.spf`), and updates the data-processing workflows that generate these files. **For examples of the updated v6.0.0 input structure, the new snow parameter files (.spf) or application of the new tools described below, see our [example repository](https://github.com/tRIBS-Model/pytRIBS-examples).**
 
 The v1.0.0 changes listed below are abbreviated. For specific details refer to the tRIBS Wiki or the pull request links associated with each change.
@@ -25,7 +25,7 @@ The v1.0.0 changes listed below are abbreviated. For specific details refer to t
 * **Test Suite:** Added a pytest suite covering the major workflows (ROSETTA soil parameters with known-answer checks, soil classification, NLDAS unit conversions, file format round trips, evaluation metrics, and class construction), run on every pull request. A new weekly workflow additionally tests against the latest dependency releases and makes small live requests to the external data services (ISRIC, SOLUS, POLARIS, NASA Giovanni) to catch upstream API changes early. ([#52](https://github.com/tRIBS-Model/pytRIBS/pull/52))
 
 ### Fixed
-* **ROSETTA Soil Parameter Grids:** Fixed two stacked issues in `process_raw_soil()`. First, `rosetta-soil` 0.32 (released 03/2026) changed `rosetta()` to return `alpha`, `n`, and `Ksat` in linear units rather than log10; pytRIBS's back-transform then silently corrupted every derived grid in any environment installed after that release. The workflow now requests geometric-mean estimates and the dependency is pinned to `rosetta-soil>=0.3`. Second, the Brooks-Corey air-entry pressure `psib` was previously approximated as `-1/alpha`, which overestimates the value depending on soil type, it is now converted from the van Genuchten parameters following Morel-Seytoux et al. (1996, WRR 32(5)), preserving the effective capillary drive so infiltration behavior is insensitive to the retention model choice. Pixels are also now predicted in large batched calls rather than one `rosetta()` call per pixel, substantially speeding up the soil workflow. ([#51](https://github.com/tRIBS-Model/pytRIBS/pull/51))
+* **ROSETTA Soil Parameter Grids:** Fixed two stacked issues in `process_raw_soil()`. First, `rosetta-soil` 0.32 (released 03/2026) changed `rosetta()` to return `alpha`, `n`, and `Ksat` in linear units rather than log10; pytRIBS's back-transform then silently corrupted every derived grid in any environment installed after that release. The workflow now requests geometric-mean estimates and the dependency is pinned to `rosetta-soil>=0.3,<0.4`. Second, the Brooks-Corey air-entry pressure `psib` was previously approximated as `-1/alpha`, which overestimates the value depending on soil type, it is now converted from the van Genuchten parameters following Morel-Seytoux et al. (1996, WRR 32(5)), preserving the effective capillary drive so infiltration behavior is insensitive to the retention model choice. Pixels are also now predicted in large batched calls rather than one `rosetta()` call per pixel, substantially speeding up the soil workflow. ([#51](https://github.com/tRIBS-Model/pytRIBS/pull/51))
 * **Class Construction from Input Files:** Constructing the `Soil`, `Land`, `Met`, or `Mesh` classes with the `input_file` argument raised a `TypeError`; all four constructors now read the input file the same way as `Model` and `Results`. ([#52](https://github.com/tRIBS-Model/pytRIBS/pull/52))
 
 ### Changed & Refactored
@@ -43,6 +43,17 @@ The v1.0.0 changes listed below are abbreviated. For specific details refer to t
 ### Removed
 * **Legacy Land Use Parameters:** Removed the Gray (1970) interception parameters (`a`, `b1`) from the land use table. ([#34](https://github.com/tRIBS-Model/pytRIBS/pull/34))
 * **Parallel Output Merging:** tRIBS v6.0.0 now writes the same consolidated spatial, Voronoi, and integrated output files in parallel mode as in serial mode. The per-processor-rank merging logic (`merge_parallel_voi`, the `parallelmode` branches in `get_spatial_files` and `get_invariant_properties`) has been removed. ([#40](https://github.com/tRIBS-Model/pytRIBS/pull/40))
+
+## [0.7.4] - 2026-07-10
+This release fixes NLDAS-2 downloads failing with `403 Forbidden` errors from the Giovanni timeseries API, and protects the soil workflow from breaking changes in newer `rosetta-soil` releases.
+
+### Fixed
+* Replaced the Giovanni `/signin` token retrieval in `get_nldas_point` with the NASA-recommended Earthdata Login (EDL) token workflow via `earthaccess`. The `/signin` endpoint is an undocumented interface whose response format changed on NASA's end, breaking authentication and causing download requests to return `403 Forbidden`. The EDL token workflow follows NASA's official Giovanni API tutorial and should be robust to future changes.
+* Passed `estimate_type="log"` to `rosetta()` in `process_raw_soil()`, so the returned `alpha`, `n`, and `Ksat` match the `10**` back-transforms applied downstream. `rosetta-soil` 0.32 changed the default to linear units, which silently double-transformed Ks, psib, and m. ([#54](https://github.com/tRIBS-Model/pytRIBS/pull/54))
+
+### Changed
+* Pinned `rosetta-soil` to `>=0.3,<0.4` to guard against further breaking changes, and raised the minimum Python version to 3.11 as required by `rosetta-soil` 0.3. ([#50](https://github.com/tRIBS-Model/pytRIBS/pull/50))
+
 
 ## [0.7.3] - 2026-06-17
 This release introduces the support for Python 3.13. The code was tested using a full example model setup but not every pytRIBS function was tested. Please open an issue if you come across other problems.
