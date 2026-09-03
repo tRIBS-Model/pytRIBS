@@ -233,9 +233,9 @@ class Shared:
 
         tRIBS names spatial output files as ``<OUTFILENAME>.HHHH_MMd`` (dynamic) or
         ``<OUTFILENAME>.HHHH_MMi`` (integrated), where HHHH is the elapsed hour and MM
-        the elapsed minute within that hour. Sub-hourly SPOPINTRVL values (e.g. 0.25
-        for 15 minute output) are therefore supported and produce files such as
-        ``SMF.0000_15d``, ``SMF.0000_30d``, ``SMF.0000_45d``, ``SMF.0001_00d``.
+
+        The first file is written one interval into the run, not at t = 0, so reading
+        from ``dtime=0`` starts at the first interval.
 
         :param str suffix: Either _00d for dynamics outputs or _00i for time-integrated ouputs.
             Only the trailing 'd'/'i' is significant; the minutes are derived from SPOPINTRVL.
@@ -243,8 +243,9 @@ class Shared:
         :param bool header: Set to False if headers are not provided with spatial files.
         :param list colnames: If header = False, column names can be provided here.
         :param bool single: If single = True then only the spatial file specified at dtime is read.
-        :return: Dictionary of pandas dataframes keyed by time string. Keys are 'HHHH' for
-            whole-hour output and 'HHHH_MM' when any requested time falls within an hour.
+        :return: Dictionary of pandas dataframes keyed by time string. Keys are 'HHHH' when
+            both SPOPINTRVL and RUNTIME are whole hours, and 'HHHH_MM' otherwise. The key
+            format is a property of the run, not of the window requested.
         """
 
         # 1. Load Configuration
@@ -252,15 +253,19 @@ class Shared:
         spopintrvl = float(self.options["spopintrvl"]["value"])
         outfilename = self.options["outfilename"]["value"]
 
-        # tRIBS stamps file names with whole minutes, so step through the run in
-        # minutes to keep sub-hourly intervals free of floating point drift.
-        runtime_min = int(round(runtime * 60))
-        intrvl_min = int(round(spopintrvl * 60))
-        start_min = int(round(float(dtime) * 60))
+        # tRIBS keeps the exact elapsed time and truncates only when formatting the file
+        # name, so accumulate in whole seconds.
+        runtime_sec = int(round(runtime * 3600))
+        interval_sec = int(round(spopintrvl * 3600))
+        start_sec = int(round(float(dtime) * 3600))
 
-        if intrvl_min <= 0:
-            print(f"SPOPINTRVL ({spopintrvl}) is not a positive number of minutes.")
+        if interval_sec <= 0:
+            print(f"SPOPINTRVL ({spopintrvl}) is not a positive number of seconds.")
             return {}
+
+        # Output starts one interval in; there is no file at t = 0.
+        if start_sec <= 0:
+            start_sec = interval_sec
 
         # 'd'/'i' selects dynamic or integrated output; minutes come from SPOPINTRVL.
         kind = suffix.strip().lower()[-1:] if suffix else 'd'
@@ -271,16 +276,16 @@ class Shared:
         dyn_data = {}
 
         # Calculate time steps to retrieve
-        times = list(range(start_min, runtime_min + 1, intrvl_min))
-        if not times or times[-1] != runtime_min:
-            times.append(runtime_min)
+        times = list(range(start_sec, runtime_sec + 1, interval_sec))
+        if not times or times[-1] != runtime_sec:
+            times.append(runtime_sec)
 
-        # Only carry minutes in the dictionary keys when the run actually needs them,
-        # so hourly output keeps the historical 'HHHH' keys.
-        sub_hourly = any(_time % 60 for _time in times)
+        # Only carry minutes in the dictionary keys when the run actually needs them, so
+        # hourly output keeps the historical 'HHHH' keys.
+        sub_hourly = (interval_sec % 3600 != 0) or (runtime_sec % 3600 != 0)
 
         for _time in times:
-            hour, minute = divmod(_time, 60)
+            hour, minute = _time // 3600, (_time % 3600) // 60
             otime = f"{hour:04d}_{minute:02d}" if sub_hourly else f"{hour:04d}"
             target_file = f"{outfilename}.{hour:04d}_{minute:02d}{kind}"
 
