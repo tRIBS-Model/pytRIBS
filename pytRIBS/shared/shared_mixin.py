@@ -234,8 +234,9 @@ class Shared:
         tRIBS names spatial output files as ``<OUTFILENAME>.HHHH_MMd`` (dynamic) or
         ``<OUTFILENAME>.HHHH_MMi`` (integrated), where HHHH is the elapsed hour and MM
 
-        The first file is written one interval into the run, not at t = 0, so reading
-        from ``dtime=0`` starts at the first interval.
+        The first dynamic file is written one interval into the run, so reading dynamic
+        output from ``dtime=0`` starts at the first interval. Integrated output does
+        include a file at t = 0, and is read from ``dtime=0``.
 
         :param str suffix: Either _00d for dynamics outputs or _00i for time-integrated ouputs.
             Only the trailing 'd'/'i' is significant; the minutes are derived from SPOPINTRVL.
@@ -263,15 +264,16 @@ class Shared:
             print(f"SPOPINTRVL ({spopintrvl}) is not a positive number of seconds.")
             return {}
 
-        # Output starts one interval in; there is no file at t = 0.
-        if start_sec <= 0:
-            start_sec = interval_sec
-
         # 'd'/'i' selects dynamic or integrated output; minutes come from SPOPINTRVL.
         kind = suffix.strip().lower()[-1:] if suffix else 'd'
         if kind not in ('d', 'i'):
             print(f"Unrecognized spatial output suffix: {suffix}")
             return {}
+
+        # Dynamic output starts one interval in; there is no *_00d file at t = 0.
+        # Integrated output does include a file at t = 0, so it is read as requested.
+        if kind == 'd' and start_sec <= 0:
+            start_sec = interval_sec
 
         dyn_data = {}
 
