@@ -66,7 +66,7 @@ For complete, end-to-end examples, two companion repositories are available:
 
 ## Release/Version Notes
 
-pytRIBS uses semantic versioning. We record updates of major, minor, and patch versions [here](CHANGELOG.md).
+pytRIBS uses semantic versioning. We record updates of major, minor, and patch versions [here](https://github.com/tRIBS-Model/pytRIBS/blob/main/CHANGELOG.md).
 
 ## Contributing
 
@@ -76,4 +76,4 @@ applications.
 
 ## License
 
-pytRIBS is released under the GNU General Public License v2. See [LICENSE](LICENSE) for details.
+pytRIBS is released under the GNU General Public License v2. See [LICENSE](https://github.com/tRIBS-Model/pytRIBS/blob/main/LICENSE) for details.
