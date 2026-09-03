@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,8 +11,9 @@ authors = [{name = "L. Wren Raming", email = "lraming@asu.edu"},
     {name = "Enrique R. Vivoni", email = "evivoni@asu.edu"}]
 description = "A pre-to-post processing python package for the distributed hydrological model tRIBS"
 readme = "README.md"
-license = {text = "GPL-version 2"}
-keywords = ["hydrology","modeling"]
+license = "GPL-2.0-only"
+license-files = ["LICENSE"]
+keywords = ["hydrology", "modeling", "tRIBS", "watershed", "distributed hydrology", "TIN"]
 dependencies = [
     "docker>=7.1.0",
     "earthaccess>=0.14.0",
@@ -40,12 +41,31 @@ dependencies = [
 ]
 version = "1.0.0"
 requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Hydrology",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+]
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
 
 [project.urls]
+Homepage = "https://github.com/tRIBS-Model/pytRIBS"
+Documentation = "https://pytribs.readthedocs.io/en/latest/"
 Repository = "https://github.com/tRIBS-Model/pytRIBS"
+Changelog = "https://github.com/tRIBS-Model/pytRIBS/blob/main/CHANGELOG.md"
+Issues = "https://github.com/tRIBS-Model/pytRIBS/issues"
+Examples = "https://github.com/tRIBS-Model/pytRIBS-examples"
+
+[tool.setuptools.packages.find]
+include = ["pytRIBS*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
