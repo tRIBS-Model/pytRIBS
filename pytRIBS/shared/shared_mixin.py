@@ -231,29 +231,65 @@ class Shared:
         serial runs, so a single file per time step is read regardless of the
         'parallelmode' setting.
 
+        tRIBS names spatial output files as ``<OUTFILENAME>.HHHH_MMd`` (dynamic) or
+        ``<OUTFILENAME>.HHHH_MMi`` (integrated), where HHHH is the elapsed hour and MM
+
+        The first dynamic file is written one interval into the run, so reading dynamic
+        output from ``dtime=0`` starts at the first interval. Integrated output does
+        include a file at t = 0, and is read from ``dtime=0``.
+
         :param str suffix: Either _00d for dynamics outputs or _00i for time-integrated ouputs.
-        :param int dtime : Option to specify time step at which to start reading files.
+            Only the trailing 'd'/'i' is significant; the minutes are derived from SPOPINTRVL.
+        :param float dtime : Option to specify time step (in hours) at which to start reading files.
         :param bool header: Set to False if headers are not provided with spatial files.
         :param list colnames: If header = False, column names can be provided here.
         :param bool single: If single = True then only the spatial file specified at dtime is read.
-        :return: Dictionary of pandas dataframes keyed by time string.
+        :return: Dictionary of pandas dataframes keyed by time string. Keys are 'HHHH' when
+            both SPOPINTRVL and RUNTIME are whole hours, and 'HHHH_MM' otherwise. The key
+            format is a property of the run, not of the window requested.
         """
 
         # 1. Load Configuration
-        runtime = int(self.options["runtime"]["value"])
-        spopintrvl = int(self.options["spopintrvl"]["value"])
+        runtime = float(self.options["runtime"]["value"])
+        spopintrvl = float(self.options["spopintrvl"]["value"])
         outfilename = self.options["outfilename"]["value"]
+
+        # tRIBS keeps the exact elapsed time and truncates only when formatting the file
+        # name, so accumulate in whole seconds.
+        runtime_sec = int(round(runtime * 3600))
+        interval_sec = int(round(spopintrvl * 3600))
+        start_sec = int(round(float(dtime) * 3600))
+
+        if interval_sec <= 0:
+            print(f"SPOPINTRVL ({spopintrvl}) is not a positive number of seconds.")
+            return {}
+
+        # 'd'/'i' selects dynamic or integrated output; minutes come from SPOPINTRVL.
+        kind = suffix.strip().lower()[-1:] if suffix else 'd'
+        if kind not in ('d', 'i'):
+            print(f"Unrecognized spatial output suffix: {suffix}")
+            return {}
+
+        # Dynamic output starts one interval in; there is no *_00d file at t = 0.
+        # Integrated output does include a file at t = 0, so it is read as requested.
+        if kind == 'd' and start_sec <= 0:
+            start_sec = interval_sec
 
         dyn_data = {}
 
         # Calculate time steps to retrieve
-        times = [dtime + i * spopintrvl for i in range((runtime - dtime) // spopintrvl + 1)]
-        if times[-1] != runtime:
-            times.append(runtime)
+        times = list(range(start_sec, runtime_sec + 1, interval_sec))
+        if not times or times[-1] != runtime_sec:
+            times.append(runtime_sec)
+
+        # Only carry minutes in the dictionary keys when the run actually needs them, so
+        # hourly output keeps the historical 'HHHH' keys.
+        sub_hourly = (interval_sec % 3600 != 0) or (runtime_sec % 3600 != 0)
 
         for _time in times:
-            otime = str(_time).zfill(4)
-            target_file = f"{outfilename}.{otime}{suffix}"
+            hour, minute = _time // 3600, (_time % 3600) // 60
+            otime = f"{hour:04d}_{minute:02d}" if sub_hourly else f"{hour:04d}"
+            target_file = f"{outfilename}.{hour:04d}_{minute:02d}{kind}"
 
             if os.path.exists(target_file):
                 try:
@@ -479,15 +515,13 @@ class Shared:
         """
 
         # Read Integrated Spatial Variables (*_00i)
-        runtime_val = int(self.options['runtime']['value'])
-        
-        # Read the file (returns a dict)
-        temp_dict = self.get_spatial_files(suffix="_00i", dtime=runtime_val, single=True)
-        
-        runtime_str = str(runtime_val).zfill(4)
+        runtime_val = float(self.options['runtime']['value'])
 
-        if temp_dict and runtime_str in temp_dict:
-            self.int_spatial_vars = temp_dict[runtime_str]
+        # Read the file (returns a dict with a single entry, since single=True)
+        temp_dict = self.get_spatial_files(suffix="_00i", dtime=runtime_val, single=True)
+
+        if temp_dict:
+            self.int_spatial_vars = next(iter(temp_dict.values()))
             
             # tRIBS outputs Voronoi Area (VAr), but we need the normalized weight for stats.
             if 'VAr' in self.int_spatial_vars.columns:
@@ -539,7 +573,7 @@ class Shared:
         Example
         -------
         >>> dynamic_data_dict = results.get_spatial_files(suffix="_00d", dtime=final_runtime, single=True)
-        >>> gdf_final_state = results.voronoi.merge(dynamic_data_dict[str(final_runtime).zfill(4)], on='ID')
+        >>> gdf_final_state = results.voronoi.merge(next(iter(dynamic_data_dict.values())), on='ID')
         >>> final_gw_raster_dict = results.grid_geodataframe( gdf=gdf_final_state, value_column='Nwt', cell_size=30.0)
 
         Raises
