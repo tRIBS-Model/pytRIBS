@@ -92,7 +92,10 @@ def _remove_spikes(coords, angle_tol_deg):
 
 def _node_streams(lines, tau_snap=1.0):
     """Snap near-coincident vertices and node all intersections once."""
-    ml = linemerge(unary_union(snap(unary_union(lines), unary_union(lines), tau_snap)))
+    noded = unary_union(snap(unary_union(lines), unary_union(lines), tau_snap))
+    if isinstance(noded, LineString):  # single-reach network: linemerge raises on a bare LineString
+        return [noded]
+    ml = linemerge(noded)
     if isinstance(ml, LineString):
         return [ml]
     return list(ml.geoms)
@@ -2039,7 +2042,9 @@ class MeshFromPSLG:
             if len(pts) >= 2:
                 resampled_edges.append(pts)
 
-        unified_stream_geom = linemerge(unary_union(lines))
+        unified_stream_geom = unary_union(lines)
+        if not isinstance(unified_stream_geom, LineString):
+            unified_stream_geom = linemerge(unified_stream_geom)
         total_len_km = sum(ln.length for ln in lines) / 1000.0
 
         stream_nodes_xy, stream_segments_local = _build_stream_pslg(
