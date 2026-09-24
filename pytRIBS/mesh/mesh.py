@@ -1972,10 +1972,12 @@ class MeshFromPSLG:
         print("\nStep 7: Assigning elevations to mesh vertices...")
         mesh_vertices_z = self._sample_elevations(mesh_vertices_xy)
 
-        # Step 7b: enforce monotonic descent along the stream network
+        # Step 7b: enforce monotonic descent along the stream network, down to the
+        # outlet boundary node
         mesh_vertices_z = self._enforce_monotonic_descent(
             mesh_vertices_xy, mesh_vertices_z, stream_nodes_xy,
-            stream_segments_local, int(stream_outlet_local_idx)
+            stream_segments_local, int(stream_outlet_local_idx),
+            outlet_xy=bnd_pts[outlet_bnd_local_idx]
         )
 
         vertices_3d = np.column_stack([mesh_vertices_xy, mesh_vertices_z])
@@ -2426,7 +2428,8 @@ class MeshFromPSLG:
         return mesh_vertices_xy, mesh['triangles']
 
     def _enforce_monotonic_descent(self, mesh_vertices_xy, mesh_vertices_z, stream_nodes_xy,
-                                   stream_segments_local, stream_outlet_local_idx):
+                                   stream_segments_local, stream_outlet_local_idx,
+                                   outlet_xy=None):
         """Step 7b: nudge stream-node elevations so they strictly descend to the outlet.
 
         FlowDirs() in tRIBS marks any node with steepest-slope <= 0 as a sink. At
@@ -2434,6 +2437,12 @@ class MeshFromPSLG:
         or inverted segments that trigger lakelist errors. Walk the assembled PSLG
         upstream from the outlet and raise any node that is not strictly higher than
         its downstream neighbour.
+
+        The chain is then closed downstream: the terminal stream node is lowered
+        below its upstream neighbour(s), and the outlet boundary node at
+        ``outlet_xy`` below the terminal. Both only ever go down. The outlet node sits
+        on the buffered boundary, so its DEM sample could be a bank or hillside well
+        above the channel.
         """
         print("\nStep 7b: Enforcing monotonic descent along stream network...")
         if not stream_segments_local:
@@ -2451,17 +2460,16 @@ class MeshFromPSLG:
 
         # The outlet terminal often samples a bank elevation rather than the
         # thalweg (especially at coarse DEM resolution). Starting BFS from it would
-        # incorrectly raise all upstream nodes. Since FillLakes always drains to
-        # kOpenBoundary regardless of elevation, the terminal's own elevation is
-        # irrelevant, skip it and root the BFS at its upstream neighbour instead.
-        outlet_upstream = mono_adj[stream_outlet_local_idx]
+        # incorrectly raise all upstream nodes, so root the BFS at its upstream
+        # neighbour(s) instead; the terminal is lowered below them afterwards.
+        term = stream_outlet_local_idx
+        outlet_upstream = list(mono_adj[term])
         if outlet_upstream:
-            bfs_root = outlet_upstream[0]
-            mono_visited = {stream_outlet_local_idx, bfs_root}
-            mono_queue = collections.deque([bfs_root])
+            mono_visited = {term, *outlet_upstream}
+            mono_queue = collections.deque(outlet_upstream)
         else:
-            mono_visited = {stream_outlet_local_idx}
-            mono_queue = collections.deque([stream_outlet_local_idx])
+            mono_visited = {term}
+            mono_queue = collections.deque([term])
         n_adjusted = 0
 
         while mono_queue:
@@ -2476,12 +2484,34 @@ class MeshFromPSLG:
                         n_adjusted += 1
                     mono_queue.append(up)
 
-        mesh_vertices_z[stream_mesh_idx] = mono_z
         if n_adjusted:
             print(f"  Adjusted {n_adjusted} of {len(stream_nodes_xy)} stream nodes "
                   f"(min gradient enforced: {self.MIN_STREAM_GRADIENT * 1000:.1f} mm/m).")
         else:
             print("  Stream elevations already monotonically decreasing — no adjustments needed.")
+
+        def drop(p, q):
+            return max(float(np.linalg.norm(np.asarray(p) - np.asarray(q))) * self.MIN_STREAM_GRADIENT, 0.01)
+
+        # Terminal below its upstream neighbour(s). Its elevation carries no meaning
+        # for tRIBS beyond draining the channel into the outlet.
+        if outlet_upstream:
+            cap = min(mono_z[u] - drop(stream_nodes_xy[u], stream_nodes_xy[term])
+                      for u in outlet_upstream)
+            if mono_z[term] > cap:
+                print(f"  Lowered terminal stream node by {mono_z[term] - cap:.2f} m to "
+                      f"{cap:.2f} m, below its upstream neighbour.")
+                mono_z[term] = cap
+        mesh_vertices_z[stream_mesh_idx] = mono_z
+
+        # Outlet boundary node below the terminal
+        if outlet_xy is not None:
+            _, o = tmp_kdt.query(outlet_xy)
+            cap = mono_z[term] - drop(outlet_xy, stream_nodes_xy[term])
+            if mesh_vertices_z[o] > cap:
+                print(f"  Lowered outlet node by {mesh_vertices_z[o] - cap:.2f} m to "
+                      f"{cap:.2f} m, below the terminal stream node.")
+                mesh_vertices_z[o] = cap
         return mesh_vertices_z
 
     def _assign_node_codes(self, mesh_vertices_xy, all_xy, final_input_df,
