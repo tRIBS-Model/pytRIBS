@@ -220,6 +220,40 @@ def _build_stream_pslg(resampled_edges, m_min, dedupe_radius):
     return uniq, segments
 
 
+def _edge_opposite_angle_sums(xy, triangles):
+    """Sum of the two angles opposite each interior edge of a triangulation.
+
+    An edge is locally Delaunay iff this sum is <= 180 degrees. Above 180 the
+    circumcenters of its two triangles swap sides, which folds the Voronoi cells
+    of the edge's endpoints (tRIBS builds cells from those circumcenters).
+
+    Returns
+    -------
+    tuple of (numpy.ndarray, numpy.ndarray)
+        ``(edges, sums)``: (E, 2) sorted vertex-index pairs of the edges shared by
+        two triangles, and the opposite-angle sum (degrees) for each. Hull edges,
+        which have only one triangle, are omitted.
+    """
+    xy = np.asarray(xy, float)
+    T = np.asarray(triangles, int)
+    if len(T) == 0:
+        return np.empty((0, 2), int), np.empty(0, float)
+    P = xy[T]
+    edges, angles = [], []
+    for k in range(3):
+        u = P[:, (k + 1) % 3] - P[:, k]
+        v = P[:, (k + 2) % 3] - P[:, k]
+        cos = (u * v).sum(1) / (np.linalg.norm(u, axis=1) * np.linalg.norm(v, axis=1))
+        angles.append(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))
+        # the angle at vertex k is opposite the edge joining the other two vertices
+        edges.append(np.sort(T[:, [(k + 1) % 3, (k + 2) % 3]], axis=1))
+    edges = np.concatenate(edges)
+    uniq, inv, cnt = np.unique(edges, axis=0, return_inverse=True, return_counts=True)
+    sums = np.bincount(inv.ravel(), weights=np.concatenate(angles), minlength=len(uniq))
+    shared = cnt == 2
+    return uniq[shared], sums[shared]
+
+
 class Preprocess:
     """
     A class for preprocessing digital elevation models (DEMs) and extracting watershed and stream network data.
@@ -1643,6 +1677,13 @@ class MeshFromPSLG:
     forbids Steiner points on any PSLG segment so every boundary and stream node is
     a preserved constraint vertex.
 
+    Because Triangle may not split segments, a stream segment with a vertex close
+    to it can stay a non-Delaunay constrained edge, which folds the tRIBS Voronoi
+    cells of its endpoints. After each triangulation such segments are split at
+    their midpoint by inserting a new stream node into the PSLG, and the PSLG is
+    re-triangulated until every stream segment is Delaunay. Stream spacing is thus
+    refined only where needed, typically between closely parallel branches.
+
     After triangulation it samples elevations from the DEM, enforces monotonic
     descent along the stream network (so tRIBS ``FlowDirs`` does not mark stream
     nodes as sinks), and assigns tRIBS boundary codes. The result can be written
@@ -1698,6 +1739,9 @@ class MeshFromPSLG:
     node_codes : numpy.ndarray
         Per-node boundary code (0=interior, 1=boundary, 2=outlet, 3=stream),
         populated by :meth:`generate`.
+    n_non_delaunay_edges : int
+        Number of edges left non-Delaunay after :meth:`generate` (should be 0).
+        Each one folds tRIBS Voronoi cells at its endpoints.
 
     Examples
     --------
@@ -1722,6 +1766,9 @@ class MeshFromPSLG:
                                     #   would fill); longer edges across open ground are
                                     #   an interior-density problem, not a merge to break
     MAX_SEPARATOR_PASSES = 6        # cap on triangulate->separate->re-triangulate passes
+    MAX_CONFORM_PASSES = 10         # cap on passes that split non-Delaunay stream segments
+    DELAUNAY_TOL_DEG = 1e-3         # opposite-angle sums within this of 180 deg are
+                                    #   co-circular ties (harmless), not violations
 
     def __init__(self, interior_points, watershed, stream_network, dem_file,
                  outlet=None, boundary_buffer_dist=30.0, boundary_spacing=50.0,
@@ -1746,6 +1793,7 @@ class MeshFromPSLG:
         self.vertices = None
         self.triangles = None
         self.node_codes = None
+        self.n_non_delaunay_edges = None
 
     # Input coercion helpers
     @staticmethod
@@ -1845,13 +1893,17 @@ class MeshFromPSLG:
         stream_outlet_local_idx = int(stream_outlet_local_idx)
 
         # Steps 4-6: assemble points (boundary, interior, then stream), build the PSLG
-        # segments, and triangulate. With separate_parallel_streams on, repeat: after
-        # each triangulation find any TIN edge that directly bridges two
-        # topologically-distant stream nodes (a premature merge), drop an interior
-        # separator node on its midpoint, and re-triangulate. The midpoint lies on the
-        # offending edge so the constrained Delaunay cannot re-form it.
+        # segments, and triangulate. Then refine and repeat until nothing changes:
+        #  - Conform: split every non-Delaunay stream segment at its midpoint with a
+        #    new stream node (see _conform_stream_segments).
+        #  - With separate_parallel_streams on, find any TIN edge that directly
+        #    bridges two topologically-distant stream nodes (a premature merge), drop
+        #    an interior separator node on its midpoint. The midpoint lies on the
+        #    offending edge so the constrained Delaunay cannot re-form it.
         print("\nStep 4-6: Combining points, defining constraints, and triangulating...")
-        sep_pass = 0
+        sep_pass = conform_pass = 0
+        sep_capped = False
+        n_split_total = n_dropped_total = 0
         while True:
             final_non_stream_pts = pd.concat([bnd_df, all_interior], ignore_index=True)
             n_non_stream = len(final_non_stream_pts)  # boundary rows stay at 0..n_bnd-1
@@ -1867,25 +1919,54 @@ class MeshFromPSLG:
 
             mesh_vertices_xy, triangles = self._triangulate(all_xy, segments)
 
-            if not self.separate_parallel_streams:
+            # Detect separators before conforming, which changes the stream arrays
+            # they are indexed against.
+            new_seps = np.empty((0, 2))
+            if self.separate_parallel_streams and not sep_capped:
+                new_seps = self._detect_stream_merge_separators(
+                    mesh_vertices_xy, triangles, stream_nodes_xy, stream_segments_local,
+                    all_interior[['x', 'y']].values if len(all_interior) else np.empty((0, 2)))
+                if len(new_seps) and sep_pass >= self.MAX_SEPARATOR_PASSES:
+                    print(f"  WARNING: {len(new_seps)} premature stream merge(s) remain after "
+                          f"{self.MAX_SEPARATOR_PASSES} passes; leaving them. A finer "
+                          f"stream_point_spacing may help if they matter.")
+                    sep_capped = True
+                    new_seps = np.empty((0, 2))
+
+            n_split = n_dropped = 0
+            if conform_pass < self.MAX_CONFORM_PASSES:
+                stream_nodes_xy, stream_segments_local, all_interior, n_split, n_dropped = \
+                    self._conform_stream_segments(mesh_vertices_xy, triangles, stream_nodes_xy,
+                                                  stream_segments_local, all_interior)
+
+            if not len(new_seps) and not n_split and not n_dropped:
                 break
-            new_seps = self._detect_stream_merge_separators(
-                mesh_vertices_xy, triangles, stream_nodes_xy, stream_segments_local,
-                all_interior[['x', 'y']].values if len(all_interior) else np.empty((0, 2)))
-            if not len(new_seps):
-                if sep_pass:
-                    print(f"  Premature stream merges resolved after {sep_pass} pass(es).")
-                break
-            sep_pass += 1
-            if sep_pass > self.MAX_SEPARATOR_PASSES:
-                print(f"  WARNING: {len(new_seps)} premature stream merge(s) remain after "
-                      f"{self.MAX_SEPARATOR_PASSES} passes; leaving them. A finer "
-                      f"stream_point_spacing may help if they matter.")
-                break
-            print(f"  Pass {sep_pass}: inserting {len(new_seps)} separator node(s) and "
-                  f"re-triangulating.")
-            sep_df = pd.DataFrame({'x': new_seps[:, 0], 'y': new_seps[:, 1], 'code': 0})
-            all_interior = pd.concat([all_interior, sep_df], ignore_index=True)
+            if len(new_seps):
+                sep_pass += 1
+                print(f"  Separator pass {sep_pass}: inserting {len(new_seps)} separator "
+                      f"node(s).")
+                sep_df = pd.DataFrame({'x': new_seps[:, 0], 'y': new_seps[:, 1], 'code': 0})
+                all_interior = pd.concat([all_interior, sep_df], ignore_index=True)
+            if n_split or n_dropped:
+                conform_pass += 1
+                n_split_total += n_split
+                n_dropped_total += n_dropped
+                print(f"  Conform pass {conform_pass}: split {n_split} non-Delaunay stream "
+                      f"segment(s)" + (f", dropped {n_dropped} encroaching interior node(s)"
+                                       if n_dropped else "") + ".")
+            print("  Re-triangulating.")
+
+        if sep_pass and not sep_capped:
+            print(f"  Premature stream merges resolved after {sep_pass} pass(es).")
+        if n_split_total or n_dropped_total:
+            print(f"  Added {n_split_total} stream node(s) to make stream segments Delaunay "
+                  f"({len(stream_nodes_xy)} stream nodes in total).")
+        _, angle_sums = _edge_opposite_angle_sums(mesh_vertices_xy, triangles)
+        self.n_non_delaunay_edges = int((angle_sums > 180.0 + self.DELAUNAY_TOL_DEG).sum())
+        if self.n_non_delaunay_edges:
+            print(f"  WARNING: {self.n_non_delaunay_edges} non-Delaunay edge(s) remain. tRIBS "
+                  f"builds folded Voronoi cells at their endpoints, which can corrupt memory "
+                  f"when it resamples grids. Check the mesh before running tRIBS.")
 
         # Step 7: elevations for all (incl. Steiner) vertices
         print("\nStep 7: Assigning elevations to mesh vertices...")
@@ -2223,6 +2304,79 @@ class MeshFromPSLG:
             seps = seps[d > tol]
         return seps
 
+    def _conform_stream_segments(self, mesh_vertices_xy, triangles, stream_nodes_xy,
+                                 stream_segments_local, all_interior):
+        """Split stream segments that are not Delaunay in the triangulation.
+
+        With ``YY`` Triangle cannot split a PSLG segment, so a stream segment with a
+        vertex inside its diametral circle (typically a separator node, a node on a
+        closely parallel branch, or a wavelet point) can remain a constrained edge
+        whose two opposite angles sum to more than 180 degrees. Each such segment is
+        split at its midpoint by a new stream node, which is a real PSLG node (code
+        3, included in monotonic descent and separator detection). Halving the
+        segment shrinks its diametral circle; the caller re-triangulates and repeats
+        until no segment is left.
+
+        A segment shorter than ``2 * MIN_STREAM_SPACING`` is not split further.
+        Instead, any interior input point opposite it at an obtuse angle (the point
+        encroaching it) is dropped. Other offenders (a stream node of another branch
+        or a Triangle Steiner point) are left for the final check to report.
+
+        Returns
+        -------
+        tuple
+            ``(stream_nodes_xy, stream_segments_local, all_interior, n_split,
+            n_dropped)``. New stream nodes are appended, so existing stream node
+            indices stay valid. Inputs are returned unchanged when nothing is found.
+        """
+        unchanged = (stream_nodes_xy, stream_segments_local, all_interior, 0, 0)
+        if not stream_segments_local:
+            return unchanged
+        edges, sums = _edge_opposite_angle_sums(mesh_vertices_xy, triangles)
+        bad = edges[sums > 180.0 + self.DELAUNAY_TOL_DEG]
+        if not len(bad):
+            return unchanged
+
+        n_mesh = len(mesh_vertices_xy)
+        bad_keys = set((bad[:, 0] * n_mesh + bad[:, 1]).tolist())
+        S = np.asarray(stream_nodes_xy, float)
+        # Map each stream node to its mesh vertex (positions preserved by the YY switch)
+        _, stream_mesh_idx = cKDTree(mesh_vertices_xy).query(S)
+        T = np.asarray(triangles)
+
+        new_nodes, new_segs, drop_xy = [], [], []
+        for i, j in stream_segments_local:
+            a, b = sorted((int(stream_mesh_idx[i]), int(stream_mesh_idx[j])))
+            if a * n_mesh + b not in bad_keys:
+                new_segs.append((i, j))
+            elif np.linalg.norm(S[i] - S[j]) >= 2 * self.MIN_STREAM_SPACING:
+                k = len(S) + len(new_nodes)
+                new_nodes.append(0.5 * (S[i] + S[j]))
+                new_segs += [(i, k), (k, j)]
+            else:
+                new_segs.append((i, j))
+                pa, pb = mesh_vertices_xy[a], mesh_vertices_xy[b]
+                for t in T[(T == a).any(axis=1) & (T == b).any(axis=1)]:
+                    pr = mesh_vertices_xy[t[(t != a) & (t != b)][0]]
+                    if np.dot(pa - pr, pb - pr) < 0:   # obtuse: inside the diametral circle
+                        drop_xy.append(pr)
+
+        n_dropped = 0
+        if drop_xy and len(all_interior):
+            d, idx = cKDTree(all_interior[['x', 'y']].values).query(np.asarray(drop_xy))
+            drop_rows = np.unique(idx[d < 1e-3])
+            if len(drop_rows):
+                keep = np.ones(len(all_interior), dtype=bool)
+                keep[drop_rows] = False
+                all_interior = all_interior[keep].reset_index(drop=True)
+                n_dropped = len(drop_rows)
+
+        if not new_nodes and not n_dropped:
+            return unchanged
+        if new_nodes:
+            S = np.vstack([S, new_nodes])
+        return S, new_segs, all_interior, len(new_nodes), n_dropped
+
     def _sample_elevations(self, points_xy):
         """Sample DEM elevations for a list of (x, y) points, handling nodata.
 
@@ -2262,6 +2416,10 @@ class MeshFromPSLG:
         # Interior Steiner points are still added as needed by the quality options.
         # This ensures every stream-coded node is an original PSLG node with a
         # monotonically-enforced elevation, not a DEM-raw Steiner interpolation.
+        # Without it, Triangle's stream Steiner points keep raw DEM elevations, often
+        # sit above the enforced node upstream, and turn it into a tRIBS sink (tested
+        # with single Y: 2-17 stream sinks per basin vs. none). Segments that must be
+        # split to stay Delaunay are split by _conform_stream_segments instead.
         mesh = tr.triangulate({'vertices': Vn, 'segments': segments},
                               f"p{self.mesh_quality_opts}DjYY")
         mesh_vertices_xy = _denormalize_coords(np.asarray(mesh['vertices']), origin_xy, scale_xy)
