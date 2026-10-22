@@ -1281,21 +1281,21 @@ class GenerateMesh:
 
         significant_points = []
 
+        # A level-`level` db1 (Haar) coefficient covers a 2**level x 2**level block of DEM
+        # cells. Deriving the block size as height // v.shape[0] is wrong: pywt rounds the
+        # coefficient grid up (ceil(height / 2**level)), so unless the DEM is a multiple of
+        # 2**level it comes out one cell short and every point drifts toward the top-left
+        # corner (to 3/4 of the extent at level 2), leaving the bottom/right strips empty.
+        cell = 2 ** level
+
         for idx in sig_indices:
             row, col = idx
 
-            # Compute the spatial extent of the cell
-            rows_per_cell = self.height // v.shape[0]
-            cols_per_cell = self.width // v.shape[1]
-
-            row_start = row * rows_per_cell
-            row_end = (row + 1) * rows_per_cell
-            col_start = col * cols_per_cell
-            col_end = (col + 1) * cols_per_cell
-
-            # Handle edge cases where dimensions are not evenly divisible
-            row_end = min(row_end, self.height)
-            col_end = min(col_end, self.width)
+            # Spatial extent of the cell; the last row/column of blocks may be partial
+            row_start = row * cell
+            row_end = min(row_start + cell, self.height)
+            col_start = col * cell
+            col_end = min(col_start + cell, self.width)
 
             # Extract DEM data and coordinate grids within the cell (nodata-filled, so
             # the feature location is not pulled to a terrain->nodata edge)
